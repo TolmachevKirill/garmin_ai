@@ -1,0 +1,25 @@
+# Secrets & auth
+.env
+tokens/
+*.token.json
+
+# Personal health data - never commit
+data/
+tests/_tmp_data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PyInstaller build output
+build/
+dist/
+dist2/
+*.spec.bak

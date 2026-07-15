@@ -1,0 +1,10 @@
+garminconnect[typed]>=0.2.20
+curl_cffi>=0.7.0
+python-dotenv>=1.0.1
+pandas>=2.2.0
+fitdecode>=0.10.0
+openai>=1.40.0
+python-telegram-bot>=21.0
+fastapi>=0.110.0
+uvicorn>=0.29.0
+python-multipart>=0.0.9
