@@ -6,6 +6,7 @@
     python -m garmin_pipeline.cli daily --today
     python -m garmin_pipeline.cli daily --date 2026-07-12
     python -m garmin_pipeline.cli context --days 14
+    python -m garmin_pipeline.cli range --from 2026-07-18 --to 2026-07-31
     python -m garmin_pipeline.cli activity search --latest
     python -m garmin_pipeline.cli activity search --date 2026-07-05 --type running
     python -m garmin_pipeline.cli activity export --latest
@@ -40,9 +41,16 @@ from garmin_pipeline.collectors.activity import (
 from garmin_pipeline.collectors.fit import compute_km_splits_with_fallback
 from garmin_pipeline.collectors.context import build_context
 from garmin_pipeline.collectors.daily import collect_daily
+from garmin_pipeline.collectors.range_report import build_range_report
 from garmin_pipeline.collectors.weekly import _activity_to_summary, build_weekly_report  # noqa: F401 (переиспользуем агрегатор)
 from garmin_pipeline.collectors.workouts import create_and_schedule
-from garmin_pipeline.formatting import render_activity_md, render_context_md, render_daily_md, render_weekly_md
+from garmin_pipeline.formatting import (
+    render_activity_md,
+    render_context_md,
+    render_daily_md,
+    render_range_report_md,
+    render_weekly_md,
+)
 from garmin_pipeline.library import (
     activity_csv_path,
     activity_file_stem,
@@ -50,6 +58,7 @@ from garmin_pipeline.library import (
     write_activity_md,
     write_context,
     write_daily,
+    write_range_report,
     write_weekly,
 )
 from garmin_pipeline.rollup import build_monthly_rollup
@@ -102,6 +111,16 @@ def cmd_context(args: argparse.Namespace) -> int:
     path = write_context(content)
     update_index()
     print(f"Снапшот записан: {path}")
+    return 0
+
+
+def cmd_range(args: argparse.Namespace) -> int:
+    client = get_client(interactive=False)
+    report = build_range_report(client, args.date_from, args.date_to)
+    content = render_range_report_md(report)
+    path = write_range_report(args.date_from, args.date_to, content)
+    update_index()
+    print(f"Отчёт за период записан: {path}")
     return 0
 
 
@@ -249,6 +268,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_context.add_argument("--days", type=int, default=14, help="Сколько последних дней включить (по умолчанию 14)")
     p_context.set_defaults(func=cmd_context)
+
+    p_range = sub.add_parser(
+        "range", help="Отчёт за произвольный период: шаги/дистанция + тренировки по типам"
+    )
+    p_range.add_argument("--from", dest="date_from", required=True, help="YYYY-MM-DD")
+    p_range.add_argument("--to", dest="date_to", required=True, help="YYYY-MM-DD")
+    p_range.set_defaults(func=cmd_range)
 
     p_activity = sub.add_parser("activity", help="Поиск/экспорт конкретных тренировок")
     activity_sub = p_activity.add_subparsers(dest="activity_command", required=True)

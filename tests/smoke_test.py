@@ -37,11 +37,15 @@ from garmin_pipeline.cache import (  # noqa: E402
 from garmin_pipeline.collectors.activity import compute_km_splits  # noqa: E402
 from garmin_pipeline.collectors.daily import DailyBundle  # noqa: E402
 from garmin_pipeline.collectors.weekly import _aggregate_activities, _mean  # noqa: E402
+from garmin_pipeline.collectors.range_report import _aggregate_by_type, range_report_from_cache  # noqa: E402
 from garmin_pipeline.formatting import (  # noqa: E402
+    activity_icon,
+    activity_label_ru,
     fmt_duration,
     render_activity_md,
     render_context_md,
     render_daily_md,
+    render_range_report_md,
     render_weekly_md,
 )
 from garmin_pipeline.library import (  # noqa: E402
@@ -60,6 +64,7 @@ from garmin_pipeline import llm_client  # noqa: E402
 from garmin_pipeline import bot as garmin_bot  # noqa: E402
 import desktop_app  # noqa: E402
 from garmin_pipeline.rollup import build_monthly_rollup  # noqa: E402
+from garmin_pipeline.webapp import templates as webapp_templates  # noqa: E402
 
 
 def test_daily_render_and_write() -> None:
@@ -496,6 +501,84 @@ def test_raw_payload_roundtrip() -> None:
     print("OK: raw_payload roundtrip")
 
 
+def test_activity_icon_and_label() -> None:
+    assert activity_icon("running") == "🏃"
+    assert activity_icon(None) == "🎯"
+    assert activity_icon("some_unknown_type") == "🎯"
+    assert activity_label_ru("jump_rope") == "Скакалка"
+    assert activity_label_ru("totally_custom_type") == "Totally custom type"
+    print("OK: activity_icon + activity_label_ru")
+
+
+def test_aggregate_by_type_live_dicts() -> None:
+    """_aggregate_by_type должен одинаково работать и на 'живых' словарях
+
+    активностей (ключи type/distance_m/...), и на строках кэша (activity_type/
+    distance_km/...) - см. аналогичный приём в weekly._aggregate_activities."""
+    activities = [
+        {"type": "running", "distance_m": 8000, "duration_s": 2400, "avg_hr": 145, "avg_pace_s_per_km": 300, "calories": 500},
+        {"type": "running", "distance_m": 6000, "duration_s": 1800, "avg_hr": 150, "avg_pace_s_per_km": 300, "calories": 380},
+        {"type": "jump_rope", "distance_m": None, "duration_s": 600, "avg_hr": 130, "calories": 120},
+    ]
+    agg = _aggregate_by_type(activities)
+    assert agg["running"]["count"] == 2
+    assert agg["running"]["total_distance_m"] == 14000
+    assert agg["running"]["avg_distance_m"] == 7000
+    assert agg["running"]["total_duration_s"] == 4200
+    assert agg["running"]["avg_hr"] == 148  # round(mean(145, 150))
+    assert agg["running"]["total_calories"] == 880
+    assert agg["jump_rope"]["count"] == 1
+    assert agg["jump_rope"]["total_distance_m"] is None
+    print("OK: _aggregate_by_type on live activity dicts ->", agg)
+
+
+def test_range_report_from_cache_and_render() -> None:
+    """Заполняем кэш дневными метриками (шаги + дистанция по шагам) и
+
+    тренировками за диапазон дат, читаем через range_report_from_cache (без
+    обращения к Garmin API) и рендерим markdown + HTML-страницу дашборда."""
+    with get_connection() as conn:
+        upsert_daily_metrics(
+            conn, DailyMetrics(date="2026-07-18", steps=8000, distance_m=6200.0, sleep_hours=7.0, hrv_ms=44, rhr=52, stress_avg=22)
+        )
+        upsert_daily_metrics(
+            conn, DailyMetrics(date="2026-07-19", steps=12000, distance_m=9100.0, sleep_hours=6.5, hrv_ms=41, rhr=55, stress_avg=28)
+        )
+        upsert_activity(
+            conn,
+            ActivitySummary(
+                activity_id="range-1", date="2026-07-18", activity_type="running",
+                name="Бег", distance_km=8.0, duration_s=2400, avg_hr=145,
+                avg_pace_s_per_km=300, calories=500,
+            ),
+        )
+        upsert_activity(
+            conn,
+            ActivitySummary(
+                activity_id="range-2", date="2026-07-19", activity_type="jump_rope",
+                name="Скакалка", distance_km=None, duration_s=600, avg_hr=130, calories=120,
+            ),
+        )
+
+    report = range_report_from_cache("2026-07-18", "2026-07-19")
+    assert report["days_total"] == 2
+    assert report["steps_total"] == 20000
+    assert report["steps_avg_per_day"] == 10000
+    assert report["distance_total_m"] == 6200.0 + 9100.0
+    assert report["activities_count"] == 2
+    assert report["by_type"]["running"]["count"] == 1
+    assert report["by_type"]["jump_rope"]["count"] == 1
+
+    content = render_range_report_md(report)
+    assert "Отчёт за период" in content
+    assert "🏃" in content and "🪢" in content
+
+    html_page = webapp_templates.range_report_page(report)
+    assert "<html" in html_page
+    assert "20000" in html_page or "20 000" in html_page  # суммарные шаги где-то на странице
+    print("OK: range_report_from_cache + render_range_report_md + range_report_page")
+
+
 def test_index() -> None:
     path = update_index()
     assert path.exists()
@@ -519,6 +602,9 @@ if __name__ == "__main__":
     test_activity_export_render()
     test_aggregate_and_mean()
     test_aggregate_excludes_low_signal_types()
+    test_activity_icon_and_label()
+    test_aggregate_by_type_live_dicts()
+    test_range_report_from_cache_and_render()
     test_raw_payload_roundtrip()
     test_analyze_surface()
     test_monthly_rollup()

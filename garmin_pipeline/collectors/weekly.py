@@ -51,6 +51,7 @@ def _activity_to_summary(act: dict[str, Any]) -> ActivitySummary:
         avg_pace_s_per_km=act.get("avg_pace_s_per_km"),
         elevation_gain_m=act.get("elevation_gain_m"),
         training_effect_aerobic=act.get("training_effect_aerobic"),
+        calories=act.get("calories"),
         raw=act,
     )
 

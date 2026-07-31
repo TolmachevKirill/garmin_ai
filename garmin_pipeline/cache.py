@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
     body_battery_high INTEGER,
     body_battery_low INTEGER,
     steps INTEGER,
+    distance_m REAL,
     raw_json TEXT,
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS activities (
     avg_pace_s_per_km REAL,
     elevation_gain_m REAL,
     training_effect_aerobic REAL,
+    calories REAL,
     raw_json TEXT,
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -71,6 +73,7 @@ class DailyMetrics:
     body_battery_high: int | None = None
     body_battery_low: int | None = None
     steps: int | None = None
+    distance_m: float | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -87,7 +90,26 @@ class ActivitySummary:
     avg_pace_s_per_km: float | None = None
     elevation_gain_m: float | None = None
     training_effect_aerobic: float | None = None
+    calories: float | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+
+# Лёгкие миграции для баз, созданных до появления этих колонок - SQLite не
+# добавляет новые столбцы в существующие таблицы через `CREATE TABLE IF NOT
+# EXISTS`, поэтому добавляем их отдельно и молча игнорируем "уже есть".
+_MIGRATIONS = (
+    "ALTER TABLE daily_metrics ADD COLUMN distance_m REAL",
+    "ALTER TABLE activities ADD COLUMN calories REAL",
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for statement in _MIGRATIONS:
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError:
+            pass  # колонка уже существует
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -95,6 +117,7 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -113,8 +136,8 @@ def upsert_daily_metrics(conn: sqlite3.Connection, metrics: DailyMetrics) -> Non
         """
         INSERT INTO daily_metrics (
             date, sleep_hours, sleep_score, hrv_ms, rhr, stress_avg,
-            body_battery_high, body_battery_low, steps, raw_json, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            body_battery_high, body_battery_low, steps, distance_m, raw_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT(date) DO UPDATE SET
             sleep_hours=excluded.sleep_hours,
             sleep_score=excluded.sleep_score,
@@ -124,6 +147,7 @@ def upsert_daily_metrics(conn: sqlite3.Connection, metrics: DailyMetrics) -> Non
             body_battery_high=excluded.body_battery_high,
             body_battery_low=excluded.body_battery_low,
             steps=excluded.steps,
+            distance_m=excluded.distance_m,
             raw_json=excluded.raw_json,
             updated_at=datetime('now')
         """,
@@ -137,6 +161,7 @@ def upsert_daily_metrics(conn: sqlite3.Connection, metrics: DailyMetrics) -> Non
             metrics.body_battery_high,
             metrics.body_battery_low,
             metrics.steps,
+            metrics.distance_m,
             json.dumps(metrics.raw, ensure_ascii=False),
         ),
     )
@@ -148,8 +173,8 @@ def upsert_activity(conn: sqlite3.Connection, activity: ActivitySummary) -> None
         INSERT INTO activities (
             activity_id, date, activity_type, name, distance_km, duration_s,
             avg_hr, max_hr, avg_pace_s_per_km, elevation_gain_m,
-            training_effect_aerobic, raw_json, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            training_effect_aerobic, calories, raw_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT(activity_id) DO UPDATE SET
             date=excluded.date,
             activity_type=excluded.activity_type,
@@ -161,6 +186,7 @@ def upsert_activity(conn: sqlite3.Connection, activity: ActivitySummary) -> None
             avg_pace_s_per_km=excluded.avg_pace_s_per_km,
             elevation_gain_m=excluded.elevation_gain_m,
             training_effect_aerobic=excluded.training_effect_aerobic,
+            calories=excluded.calories,
             raw_json=excluded.raw_json,
             updated_at=datetime('now')
         """,
@@ -176,6 +202,7 @@ def upsert_activity(conn: sqlite3.Connection, activity: ActivitySummary) -> None
             activity.avg_pace_s_per_km,
             activity.elevation_gain_m,
             activity.training_effect_aerobic,
+            activity.calories,
             json.dumps(activity.raw, ensure_ascii=False),
         ),
     )

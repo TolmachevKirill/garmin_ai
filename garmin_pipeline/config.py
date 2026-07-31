@@ -84,6 +84,13 @@ class Settings:
         return self.library_root / "activities"
 
     @property
+    def range_dir(self) -> Path:
+        """Отчёты за произвольный период (см. collectors/range_report.py) -
+
+        не привязаны к ISO-неделе, создаются по запросу с явными датами."""
+        return self.library_root / "range"
+
+    @property
     def index_path(self) -> Path:
         return self.library_root / "_index.md"
 
@@ -96,7 +103,7 @@ class Settings:
         return self.library_root / "context.md"
 
     def ensure_dirs(self) -> None:
-        for d in (self.daily_dir, self.weekly_dir, self.monthly_dir, self.activities_dir):
+        for d in (self.daily_dir, self.weekly_dir, self.monthly_dir, self.activities_dir, self.range_dir):
             d.mkdir(parents=True, exist_ok=True)
         self.token_store.mkdir(parents=True, exist_ok=True)
         self.cache_db_path.parent.mkdir(parents=True, exist_ok=True)

@@ -11,19 +11,28 @@ from datetime import date as date_cls
 from urllib.parse import quote
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from garmin_pipeline import config
 from garmin_pipeline.cache import get_connection, upsert_activity, upsert_daily_metrics
 from garmin_pipeline.client import get_client
 from garmin_pipeline.collectors.context import build_context
 from garmin_pipeline.collectors.daily import collect_daily
+from garmin_pipeline.collectors.range_report import build_range_report, range_report_from_cache
 from garmin_pipeline.collectors.weekly import _activity_to_summary, build_weekly_report  # noqa: F401 (переиспользуем агрегатор)
-from garmin_pipeline.formatting import render_context_md, render_daily_md, render_weekly_md
-from garmin_pipeline.library import library_summary, read_library_file, update_index, write_context, write_daily, write_weekly
+from garmin_pipeline.formatting import render_context_md, render_daily_md, render_range_report_md, render_weekly_md
+from garmin_pipeline.library import (
+    library_summary,
+    read_library_file,
+    update_index,
+    write_context,
+    write_daily,
+    write_range_report,
+    write_weekly,
+)
 from garmin_pipeline.webapp import templates
 
-_KNOWN_CATEGORIES = {"daily", "weekly", "monthly", "activities", "context"}
+_KNOWN_CATEGORIES = {"daily", "weekly", "monthly", "activities", "context", "range"}
 
 
 def create_app() -> FastAPI:
@@ -33,6 +42,12 @@ def create_app() -> FastAPI:
     def root() -> RedirectResponse:
         target = "/dashboard" if config.settings.email else "/setup"
         return RedirectResponse(url=target)
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon() -> Response:
+        # Иконка вкладки задаётся data-URI в <head> (см. templates._FAVICON) -
+        # этот роут просто убирает шумный 404 в логах от дефолтного запроса браузера.
+        return Response(status_code=204)
 
     @app.get("/setup", response_class=HTMLResponse)
     def setup_get(request: Request) -> HTMLResponse:
@@ -96,6 +111,25 @@ def create_app() -> FastAPI:
         write_weekly(week["week_label"], render_weekly_md(week))
         update_index()
         return RedirectResponse(url=f"/dashboard?flash={quote('Недельный отчёт собран')}", status_code=303)
+
+    @app.post("/dashboard/run/range")
+    def run_range(date_from: str = Form(...), date_to: str = Form(...)) -> RedirectResponse:
+        client = get_client(interactive=False)
+        report = build_range_report(client, date_from, date_to)
+        write_range_report(date_from, date_to, render_range_report_md(report))
+        update_index()
+        return RedirectResponse(url=f"/range?from={date_from}&to={date_to}", status_code=303)
+
+    @app.get("/range", response_class=HTMLResponse)
+    def range_view(request: Request) -> HTMLResponse:
+        date_from = request.query_params.get("from")
+        date_to = request.query_params.get("to")
+        if not date_from or not date_to:
+            return HTMLResponse(templates.view_page("Ошибка", "Не указан период (from/to)."), status_code=400)
+        # Читаем из кэша (см. range_report.py) - без похода в Garmin API, так
+        # что страницу можно спокойно перезагружать/расшаривать без лимитов.
+        report = range_report_from_cache(date_from, date_to)
+        return HTMLResponse(templates.range_report_page(report))
 
     @app.get("/view", response_class=HTMLResponse)
     def view(category: str, name: str) -> HTMLResponse:

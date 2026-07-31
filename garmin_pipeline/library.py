@@ -70,6 +70,17 @@ def activity_csv_path(stem: str) -> Path:
     return settings.activities_dir / f"{stem}.csv"
 
 
+def range_report_stem(date_from: str, date_to: str) -> str:
+    return f"{date_from}_{date_to}"
+
+
+def write_range_report(date_from: str, date_to: str, content: str) -> Path:
+    settings.ensure_dirs()
+    path = settings.range_dir / f"{range_report_stem(date_from, date_to)}.md"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 def _list_files(directory: Path) -> list[str]:
     if not directory.exists():
         return []
@@ -85,6 +96,7 @@ def library_summary() -> dict[str, Any]:
         "weekly": _list_files(settings.weekly_dir),
         "monthly": _list_files(settings.monthly_dir),
         "activities": _list_files(settings.activities_dir),
+        "range": _list_files(settings.range_dir),
     }
 
 
@@ -112,6 +124,7 @@ def update_index() -> Path:
     weekly_files = _list_files(settings.weekly_dir)
     monthly_files = _list_files(settings.monthly_dir)
     activity_files = _list_files(settings.activities_dir)
+    range_files = _list_files(settings.range_dir)
 
     lines: list[str] = []
     lines.append("# Индекс библиотеки Garmin")
@@ -156,6 +169,13 @@ def update_index() -> Path:
     lines.append(f"## Activities ({len(activity_files)}) - по запросу")
     if activity_files:
         lines.append(", ".join(f.removesuffix(".md") for f in activity_files))
+    else:
+        lines.append("Пока нет.")
+    lines.append("")
+
+    lines.append(f"## Range-отчёты ({len(range_files)}) - за произвольный период, по запросу")
+    if range_files:
+        lines.append(", ".join(f.removesuffix(".md") for f in range_files))
     else:
         lines.append("Пока нет.")
     lines.append("")

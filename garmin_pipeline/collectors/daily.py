@@ -34,6 +34,7 @@ class DailyBundle:
     training_readiness_score: int | None = None
     training_readiness_feedback: str | None = None
     total_steps: int | None = None
+    total_distance_m: float | None = None
     total_calories: float | None = None
     active_calories: float | None = None
     activities: list[dict[str, Any]] = field(default_factory=list)
@@ -50,11 +51,12 @@ class DailyBundle:
             body_battery_high=self.body_battery_high,
             body_battery_low=self.body_battery_low,
             steps=self.total_steps,
+            distance_m=self.total_distance_m,
             raw=self.raw,
         )
 
     def as_summary_row(self) -> dict[str, Any]:
-        """Компактная строка дня - для таблиц по дням (weekly, context)."""
+        """Компактная строка дня - для таблиц по дням (weekly, context, range)."""
         return {
             "date": self.date,
             "sleep_hours": self.sleep_hours,
@@ -62,6 +64,7 @@ class DailyBundle:
             "rhr": self.rhr,
             "stress_avg": self.stress_avg,
             "steps": self.total_steps,
+            "distance_m": self.total_distance_m,
             "activities_count": len(self.activities),
         }
 
@@ -80,6 +83,7 @@ class DailyBundle:
             "training_readiness_score": self.training_readiness_score,
             "training_readiness_feedback": self.training_readiness_feedback,
             "total_steps": self.total_steps,
+            "total_distance_m": self.total_distance_m,
             "total_calories": self.total_calories,
             "active_calories": self.active_calories,
             "activities": self.activities,
@@ -118,6 +122,7 @@ def collect_daily(
             bundle.body_battery_high = stats.body_battery_highest_value
             bundle.body_battery_low = stats.body_battery_lowest_value
             bundle.total_steps = stats.total_steps
+            bundle.total_distance_m = stats.total_distance_meters
             bundle.total_calories = stats.total_kilocalories
             bundle.active_calories = stats.active_kilocalories
             bundle.raw["stats"] = stats.model_dump(by_alias=True)

@@ -88,6 +88,55 @@ def fmt_num(value: float | int | None, unit: str = "", digits: int = 0) -> str:
     return f"{int(round(value))}{unit}"
 
 
+_ACTIVITY_ICONS: dict[str, str] = {
+    "running": "🏃", "trail_running": "🏃", "treadmill_running": "🏃", "track_running": "🏃",
+    "walking": "🚶", "casual_walking": "🚶", "speed_walking": "🚶", "hiking": "🥾",
+    "cycling": "🚴", "road_biking": "🚴", "gravel_cycling": "🚴", "indoor_cycling": "🚴",
+    "virtual_ride": "🚴", "mountain_biking": "🚵",
+    "swimming": "🏊", "lap_swimming": "🏊", "open_water_swimming": "🏊",
+    "strength_training": "🏋️", "cardio_training": "❤️", "indoor_cardio": "❤️", "hiit": "🔥",
+    "elliptical": "🌀", "rowing": "🚣",
+    "yoga": "🧘", "meditation": "🧘", "breathwork": "🌬️", "pilates": "🤸",
+    "jump_rope": "🪢",
+    "badminton": "🏸", "tennis": "🎾", "table_tennis": "🏓", "volleyball": "🏐",
+    "basketball": "🏀", "soccer": "⚽", "golf": "⛳", "boxing": "🥊",
+}
+
+_ACTIVITY_LABELS_RU: dict[str, str] = {
+    "running": "Бег", "trail_running": "Трейл", "treadmill_running": "Бег на дорожке",
+    "track_running": "Бег на стадионе",
+    "walking": "Ходьба", "casual_walking": "Ходьба", "speed_walking": "Спортивная ходьба", "hiking": "Поход",
+    "cycling": "Велосипед", "road_biking": "Шоссейный велосипед", "gravel_cycling": "Гравийный велосипед",
+    "indoor_cycling": "Велотренажёр", "virtual_ride": "Велосипед (виртуально)", "mountain_biking": "Маунтинбайк",
+    "swimming": "Плавание", "lap_swimming": "Плавание в бассейне", "open_water_swimming": "Плавание в открытой воде",
+    "strength_training": "Силовая", "cardio_training": "Кардио", "indoor_cardio": "Кардио",
+    "hiit": "HIIT", "elliptical": "Эллипс",
+    "rowing": "Гребля", "yoga": "Йога", "meditation": "Медитация", "breathwork": "Дыхательные практики",
+    "pilates": "Пилатес", "jump_rope": "Скакалка", "other": "Другое",
+    "badminton": "Бадминтон", "tennis": "Теннис", "table_tennis": "Настольный теннис",
+    "volleyball": "Волейбол", "basketball": "Баскетбол", "soccer": "Футбол", "golf": "Гольф", "boxing": "Бокс",
+}
+
+
+def activity_icon(activity_type: str | None) -> str:
+    if not activity_type:
+        return "🎯"
+    return _ACTIVITY_ICONS.get(activity_type.lower(), "🎯")
+
+
+def activity_label_ru(activity_type: str | None) -> str:
+    """Дружелюбное русское название типа активности - для отчёта за период
+
+    и веб-дашборда. Для неизвестных типов - просто заменяем подчёркивания
+    пробелами и делаем первую букву заглавной, а не показываем 'н/д'."""
+    if not activity_type:
+        return "Другое"
+    known = _ACTIVITY_LABELS_RU.get(activity_type.lower())
+    if known:
+        return known
+    return activity_type.replace("_", " ").capitalize()
+
+
 def fmt_delta(current: float | None, previous: float | None, unit: str = "", digits: int = 0) -> str:
     """Компактная запись 'было -> стало (дельта)' для трендов в weekly."""
     if current is None or previous is None:
@@ -376,5 +425,55 @@ def render_activity_md(act: dict[str, Any]) -> str:
             f"Точки трека с переменным интервалом записи (время/HR/темп/высота): "
             f"см. `{act['csv_filename']}` в той же папке."
         )
+
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Range report (произвольный период - для веб-дашборда/публикации)
+# ---------------------------------------------------------------------------
+
+def render_range_report_md(report: dict[str, Any]) -> str:
+    """report - результат collectors.range_report.build_range_report(...)
+
+    или range_report_from_cache(...)."""
+    lines: list[str] = []
+    lines.append("---")
+    lines.append(f"date_from: {report['date_from']}")
+    lines.append(f"date_to: {report['date_to']}")
+    lines.append(f"days: {report['days_total']}")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"## Отчёт за период — {report['date_from']} – {report['date_to']}")
+    lines.append("")
+    lines.append(
+        f"Дней в периоде: {report['days_total']}. Тренировок: {report['activities_count']}."
+    )
+    lines.append("")
+    lines.append(
+        f"Шаги: суммарно {fmt_num(report.get('steps_total'))}, "
+        f"в среднем {fmt_num(report.get('steps_avg_per_day'))}/день"
+    )
+    lines.append(
+        f"Пройдено (по шагам): суммарно {fmt_km(report.get('distance_total_m'))}, "
+        f"в среднем {fmt_km(report.get('distance_avg_m_per_day'))}/день"
+    )
+
+    by_type = report.get("by_type") or {}
+    if by_type:
+        lines.append("")
+        lines.append("### По типам активности")
+        for activity_type, agg in sorted(by_type.items(), key=lambda kv: -kv[1]["count"]):
+            icon = activity_icon(activity_type)
+            label = activity_label_ru(activity_type)
+            tempo = fmt_tempo(agg.get("avg_pace_s_per_km"), activity_type)
+            lines.append(
+                f"- {icon} **{label}** — {agg['count']} шт., "
+                f"суммарно {fmt_km(agg.get('total_distance_m'))} / {fmt_duration(agg.get('total_duration_s'))}, "
+                f"в среднем {fmt_km(agg.get('avg_distance_m'))} / {fmt_duration(agg.get('avg_duration_s'))}, "
+                f"темп/скорость {tempo}, avg HR {fmt_num(agg.get('avg_hr'))}"
+            )
+
+    lines.extend(render_daily_table(report.get("daily_table") or []))
 
     return "\n".join(lines) + "\n"
