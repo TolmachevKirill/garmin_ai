@@ -118,6 +118,11 @@ python -m garmin_pipeline.cli daily --date 2026-07-12
 # Агрегированный снапшот последних N дней одним файлом - удобно для LLM/бота
 python -m garmin_pipeline.cli context --days 14
 
+# "Сырой" JSON за период (дневные метрики + тренировки, без агрегации) -
+# для произвольных вопросов, на которые нет готовой команды: ответ считает
+# сама модель (в чате с агентом или через MCP-сервер, см. ниже), а не Python
+python -m garmin_pipeline.cli export --from 2026-07-18 --to 2026-07-31
+
 # Отчёт за произвольный период для публикации (шаги/дистанция + тренировки
 # по типам с count/суммарно/в среднем) - см. также красивую страницу /range
 # в веб-дашборде. Уже засинканные прошедшие дни повторно не тянутся из
@@ -190,6 +195,40 @@ python -m garmin_pipeline.cli bot
 никаких файлов в библиотеку. В Windows-дистрибутиве (`.exe`, см. ниже) эта же
 роль у фонового потока внутри `desktop_app.py` - он сам держит кэш тёплым,
 пока приложение открыто, без Task Scheduler.
+
+## MCP-сервер (для внешних LLM-клиентов)
+
+Помимо CLI (для Cursor - см. `.cursor/skills/garmin-health/SKILL.md`) есть
+MCP-сервер (`garmin_pipeline/mcp_server.py`) - те же данные, но по протоколу
+[Model Context Protocol](https://modelcontextprotocol.io/), чтобы ими мог
+пользоваться любой MCP-совместимый клиент (Claude Desktop и т.п.), не только
+Cursor. Инструменты отдают "сырые" данные (`get_daily_metrics`,
+`get_activities`, `find_activities`, `get_activity_detail`, `sync_cache`) -
+считать ответ на конкретный вопрос ("сколько я пробежал в мае") должна сама
+модель, а не сервер; единственное исключение - `build_shareable_range_report`
+для готового файла/страницы публикации.
+
+Сервер работает через stdio - клиент сам поднимает процесс, отдельно
+запускать `cli mcp` руками не нужно. Регистрация:
+
+**Claude Desktop** (`%APPDATA%\Claude\claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "garmin-health-pipeline": {
+      "command": "C:\\путь\\к\\garmin-health-pipeline\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "garmin_pipeline.cli", "mcp"],
+      "cwd": "C:\\путь\\к\\garmin-health-pipeline"
+    }
+  }
+}
+```
+
+**Cursor** (`.cursor/mcp.json` в корне проекта или в `~/.cursor/mcp.json` глобально) -
+такой же формат, только ключ `mcpServers` внутри файла `mcp.json`. После
+сохранения конфига перезапусти клиент - он должен показать 6 доступных
+инструментов сервера `garmin-health-pipeline`.
 
 ## Как выгружать конкретную тренировку "по запросу в чате"
 

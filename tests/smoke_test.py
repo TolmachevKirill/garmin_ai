@@ -42,7 +42,8 @@ from garmin_pipeline.collectors.range_report import (  # noqa: E402
     build_range_report,
     range_report_from_cache,
 )
-from garmin_pipeline.collectors.sync import sync_days, sync_recent_days  # noqa: E402
+from garmin_pipeline.collectors.sync import ensure_range_synced, sync_days, sync_recent_days  # noqa: E402
+from garmin_pipeline.collectors.export import export_raw_range  # noqa: E402
 from garmin_pipeline.formatting import (  # noqa: E402
     activity_icon,
     activity_label_ru,
@@ -634,6 +635,74 @@ def test_build_range_report_skips_already_cached_past_days() -> None:
     print("OK: build_range_report не трогает Garmin API для уже закэшированного прошедшего периода ->", report["steps_total"])
 
 
+def test_ensure_range_synced_skips_cached_days() -> None:
+    """То же самое, но на уровне общего примитива sync.py::ensure_range_synced,
+
+    которым пользуются и build_range_report, и export.py, и MCP-инструменты."""
+    from datetime import date, timedelta
+
+    d1 = (date.today() - timedelta(days=210)).isoformat()
+    d2 = (date.today() - timedelta(days=209)).isoformat()
+    with get_connection() as conn:
+        upsert_daily_metrics(conn, DailyMetrics(date=d1, steps=1000))
+        upsert_daily_metrics(conn, DailyMetrics(date=d2, steps=2000))
+
+    missing = ensure_range_synced(_PoisonClient(), d1, d2)
+    assert missing == [], f"Оба дня уже в кэше - не должно быть недостающих, получили {missing}"
+    print("OK: ensure_range_synced не трогает Garmin API, если период уже в кэше")
+
+
+def test_export_raw_range_generic_tool() -> None:
+    """export_raw_range - generic-примитив для ad hoc вопросов (см. SKILL.md,
+
+    'Ad hoc analytical questions'): отдаёт сырые дневные метрики и тренировки
+    без какой-либо агрегации - считает ответ вызывающая модель, не Python."""
+    from datetime import date, timedelta
+
+    d1 = (date.today() - timedelta(days=220)).isoformat()
+    d2 = (date.today() - timedelta(days=219)).isoformat()
+    with get_connection() as conn:
+        upsert_daily_metrics(conn, DailyMetrics(date=d1, steps=7000, distance_m=5500.0, hrv_ms=42.0))
+        upsert_daily_metrics(conn, DailyMetrics(date=d2, steps=9000, distance_m=7200.0, hrv_ms=46.0))
+        upsert_activity(
+            conn,
+            ActivitySummary(
+                activity_id="export-1", date=d1, activity_type="cycling",
+                distance_km=20.5, duration_s=3600, avg_hr=138, calories=650,
+            ),
+        )
+
+    # Без client - только из кэша (не трогает Garmin API вообще)
+    payload = export_raw_range(d1, d2, client=None)
+    assert payload["date_from"] == d1 and payload["date_to"] == d2
+    assert len(payload["daily"]) == 2
+    assert payload["daily"][0]["steps"] == 7000
+    assert payload["daily"][0]["distance_m"] == 5500.0
+    assert "raw_json" not in payload["daily"][0], "Сырой Garmin-payload не должен утекать в generic-экспорт"
+    assert len(payload["activities"]) == 1
+    assert payload["activities"][0]["activity_type"] == "cycling"
+    assert payload["activities"][0]["distance_km"] == 20.5
+    print("OK: export_raw_range отдаёт чистые сырые данные без агрегации ->", payload["daily"])
+
+
+def test_mcp_server_tools_registered() -> None:
+    """Проверяем, что MCP-сервер (garmin_pipeline/mcp_server.py) поднимается и
+
+    регистрирует ожидаемый набор generic-инструментов - без реального запуска
+    stdio-транспорта (это делает клиент, см. README, раздел 'MCP-сервер')."""
+    import asyncio
+
+    from garmin_pipeline.mcp_server import mcp as mcp_app
+
+    tool_names = {t.name for t in asyncio.run(mcp_app.list_tools())}
+    expected = {
+        "get_daily_metrics", "get_activities", "find_activities",
+        "get_activity_detail", "sync_cache", "build_shareable_range_report",
+    }
+    assert expected.issubset(tool_names), f"Отсутствуют инструменты: {expected - tool_names}"
+    print("OK: MCP-сервер регистрирует инструменты ->", sorted(tool_names))
+
+
 def test_index() -> None:
     path = update_index()
     assert path.exists()
@@ -662,6 +731,9 @@ if __name__ == "__main__":
     test_range_report_from_cache_and_render()
     test_sync_module_wiring()
     test_build_range_report_skips_already_cached_past_days()
+    test_ensure_range_synced_skips_cached_days()
+    test_export_raw_range_generic_tool()
+    test_mcp_server_tools_registered()
     test_raw_payload_roundtrip()
     test_analyze_surface()
     test_monthly_rollup()

@@ -8,6 +8,8 @@
     python -m garmin_pipeline.cli context --days 14
     python -m garmin_pipeline.cli range --from 2026-07-18 --to 2026-07-31
     python -m garmin_pipeline.cli sync --days 3
+    python -m garmin_pipeline.cli export --from 2026-07-18 --to 2026-07-31  # сырой JSON для ad hoc вопросов
+    python -m garmin_pipeline.cli mcp  # MCP-сервер для внешних LLM-клиентов (не для ручного запуска)
     python -m garmin_pipeline.cli activity search --latest
     python -m garmin_pipeline.cli activity search --date 2026-07-05 --type running
     python -m garmin_pipeline.cli activity export --latest
@@ -42,6 +44,7 @@ from garmin_pipeline.collectors.activity import (
 from garmin_pipeline.collectors.fit import compute_km_splits_with_fallback
 from garmin_pipeline.collectors.context import build_context
 from garmin_pipeline.collectors.daily import collect_daily
+from garmin_pipeline.collectors.export import export_raw_range
 from garmin_pipeline.collectors.range_report import build_range_report
 from garmin_pipeline.collectors.sync import sync_recent_days
 from garmin_pipeline.collectors.weekly import _activity_to_summary, build_weekly_report  # noqa: F401 (переиспользуем агрегатор)
@@ -123,6 +126,31 @@ def cmd_range(args: argparse.Namespace) -> int:
     path = write_range_report(args.date_from, args.date_to, content)
     update_index()
     print(f"Отчёт за период записан: {path}")
+    return 0
+
+
+def cmd_mcp(args: argparse.Namespace) -> int:
+    """Запускает MCP-сервер (stdio) - см. mcp_server.py и README ("MCP-сервер").
+
+    Не предназначен для запуска руками в терминале - клиент (Claude Desktop,
+    Cursor и т.п.) сам поднимает этот процесс и общается с ним через stdio.
+    """
+    from garmin_pipeline.mcp_server import main as run_mcp_server
+
+    run_mcp_server()
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """"Сырой" JSON за период - без готового отчёта, для ad hoc вопросов.
+
+    Используй это (а не пиши новый агрегатор), когда пользователь просит
+    что-то, для чего нет готовой команды - посчитай ответ сам по этим данным
+    (см. export.py для описания единиц измерения полей).
+    """
+    client = get_client(interactive=False)
+    payload = export_raw_range(args.date_from, args.date_to, client=client)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -291,6 +319,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_range.add_argument("--to", dest="date_to", required=True, help="YYYY-MM-DD")
     p_range.set_defaults(func=cmd_range)
 
+    p_export = sub.add_parser(
+        "export",
+        help="'Сырой' JSON (дневные метрики + тренировки) за период - для ad hoc вопросов без готового отчёта",
+    )
+    p_export.add_argument("--from", dest="date_from", required=True, help="YYYY-MM-DD")
+    p_export.add_argument("--to", dest="date_to", required=True, help="YYYY-MM-DD")
+    p_export.set_defaults(func=cmd_export)
+
     p_sync = sub.add_parser(
         "sync", help="Фоновая синхронизация кэша за последние N дней (без записи файлов)"
     )
@@ -346,6 +382,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_web.add_argument("--host", default="127.0.0.1")
     p_web.add_argument("--port", type=int, default=8765)
     p_web.set_defaults(func=cmd_web)
+
+    p_mcp = sub.add_parser(
+        "mcp", help="Запустить MCP-сервер (stdio) для внешних LLM-клиентов (Claude Desktop и т.п.)"
+    )
+    p_mcp.set_defaults(func=cmd_mcp)
 
     p_cache = sub.add_parser("cache", help="Диагностика локального SQLite-кэша")
     cache_sub = p_cache.add_subparsers(dest="cache_command", required=True)

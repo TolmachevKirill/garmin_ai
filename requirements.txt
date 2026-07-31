@@ -8,3 +8,4 @@ python-telegram-bot>=21.0
 fastapi>=0.110.0
 uvicorn>=0.29.0
 python-multipart>=0.0.9
+mcp>=1.9.0,<2

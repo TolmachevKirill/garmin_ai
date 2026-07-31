@@ -22,7 +22,8 @@ from datetime import timedelta
 
 from garminconnect import Garmin
 
-from garmin_pipeline.cache import get_connection, upsert_activity, upsert_daily_metrics
+from garmin_pipeline.cache import get_connection, get_daily_metrics_range, upsert_activity, upsert_daily_metrics
+from garmin_pipeline.collectors.activity import daterange
 from garmin_pipeline.collectors.daily import collect_daily
 from garmin_pipeline.collectors.weekly import _activity_to_summary  # noqa: F401 (переиспользуем)
 
@@ -50,3 +51,25 @@ def sync_recent_days(client: Garmin, days: int = 3) -> int:
     today = date_cls.today()
     date_list = [(today - timedelta(days=i)).isoformat() for i in range(days)]
     return sync_days(client, date_list)
+
+
+def ensure_range_synced(client: Garmin, date_from: str, date_to: str) -> list[str]:
+    """Убеждается, что кэш покрывает [date_from, date_to], дособирая из Garmin
+
+    API только недостающее - общий примитив для всего, что читает произвольный
+    период (collectors/range_report.py, collectors/export.py, MCP-инструменты
+    в mcp_server.py). Прошедшие дни, уже присутствующие в кэше, не трогает;
+    сегодняшний день пересобирает всегда (его метрики ещё меняются в течение
+    дня). Возвращает список реально досинканных дат (для логов/диагностики).
+    """
+    days = daterange(date_from, date_to)
+    today = date_cls.today()
+    past_days = [d for d in days if date_cls.fromisoformat(d) <= today]
+
+    with get_connection() as conn:
+        cached_dates = {r["date"] for r in get_daily_metrics_range(conn, date_from, date_to)}
+
+    missing_days = [d for d in past_days if d not in cached_dates or date_cls.fromisoformat(d) == today]
+    if missing_days:
+        sync_days(client, missing_days)
+    return missing_days

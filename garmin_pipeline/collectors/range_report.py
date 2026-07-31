@@ -12,21 +12,13 @@ from __future__ import annotations
 import sqlite3
 import statistics
 from collections import defaultdict
-from datetime import date as date_cls
 from typing import Any
 
 from garminconnect import Garmin
 
-from garmin_pipeline.cache import (
-    get_activities_range,
-    get_connection,
-    get_daily_metrics_range,
-    upsert_activity,
-    upsert_daily_metrics,
-)
+from garmin_pipeline.cache import get_activities_range, get_connection, get_daily_metrics_range
 from garmin_pipeline.collectors.activity import daterange
-from garmin_pipeline.collectors.daily import collect_daily
-from garmin_pipeline.collectors.weekly import _activity_to_summary  # noqa: F401 (переиспользуем)
+from garmin_pipeline.collectors.sync import ensure_range_synced
 
 
 def _aggregate_by_type(rows: list[dict[str, Any]] | list[sqlite3.Row]) -> dict[str, dict[str, Any]]:
@@ -101,40 +93,16 @@ def _build_report(
 
 
 def build_range_report(client: Garmin, date_from: str, date_to: str) -> dict[str, Any]:
-    """Инкрементально дособирает период и агрегирует из кэша.
+    """Инкрементально дособирает период (через ensure_range_synced - см.
 
-    Раньше эта функция всегда перетягивала все дни периода из Garmin API -
-    даже если они уже были в кэше (например, после weekly/daily-отчёта или
-    предыдущего range-запроса на пересекающийся период). Это лишний трафик
-    и медленно, а сама по себе выборка за произвольный период дат - базовая
-    операция, которая должна быть "мгновенной" (примерно как графики за
-    несколько дней в самом Garmin Connect), а не требовать пересбора каждый
-    раз. Поэтому сейчас идём в API только за:
-    - днями, которых ещё нет в кэше;
-    - сегодняшним днём - его метрики (шаги, сон и т.д.) в течение дня ещё
-      меняются, поэтому его обновляем всегда, даже если он уже был закэширован.
-
-    Если период целиком уже синхронизирован (см. sync.py и Task Scheduler-
-    задачу scripts/register_daily_sync_task.ps1) - обращений к Garmin вообще
-    не будет, отчёт соберётся из локальной SQLite мгновенно.
+    sync.py) и агрегирует из кэша. Если период целиком уже синхронизирован
+    (weekly/daily/context-отчётом, предыдущим range-запросом или фоновой
+    задачей sync) - обращений к Garmin API не будет вообще, отчёт соберётся
+    из локальной SQLite мгновенно. Это тот же принцип, которым пользуется
+    export.py и MCP-инструменты (mcp_server.py) для произвольных ad hoc
+    запросов - "убедиться, что период в кэше" отделено от "посчитать ответ".
     """
-    days = daterange(date_from, date_to)
-    today = date_cls.today()
-    past_days = [d for d in days if date_cls.fromisoformat(d) <= today]
-
-    with get_connection() as conn:
-        cached_dates = {r["date"] for r in get_daily_metrics_range(conn, date_from, date_to)}
-
-    missing_days = [d for d in past_days if d not in cached_dates or date_cls.fromisoformat(d) == today]
-
-    if missing_days:
-        with get_connection() as conn:
-            for day in missing_days:
-                bundle = collect_daily(client, day, with_activity_splits=False, conn=conn)
-                upsert_daily_metrics(conn, bundle.to_cache_metrics())
-                for act in bundle.activities:
-                    upsert_activity(conn, _activity_to_summary(act))
-
+    ensure_range_synced(client, date_from, date_to)
     return range_report_from_cache(date_from, date_to)
 
 
