@@ -37,7 +37,12 @@ from garmin_pipeline.cache import (  # noqa: E402
 from garmin_pipeline.collectors.activity import compute_km_splits  # noqa: E402
 from garmin_pipeline.collectors.daily import DailyBundle  # noqa: E402
 from garmin_pipeline.collectors.weekly import _aggregate_activities, _mean  # noqa: E402
-from garmin_pipeline.collectors.range_report import _aggregate_by_type, range_report_from_cache  # noqa: E402
+from garmin_pipeline.collectors.range_report import (  # noqa: E402
+    _aggregate_by_type,
+    build_range_report,
+    range_report_from_cache,
+)
+from garmin_pipeline.collectors.sync import sync_days, sync_recent_days  # noqa: E402
 from garmin_pipeline.formatting import (  # noqa: E402
     activity_icon,
     activity_label_ru,
@@ -402,6 +407,7 @@ def test_desktop_app_imports_cleanly() -> None:
     assert callable(desktop_app.main)
     assert callable(desktop_app._run_web_server)
     assert callable(desktop_app._run_bot_if_configured)
+    assert callable(desktop_app._run_background_sync)
     print("OK: desktop_app imports cleanly and exposes main()")
 
 
@@ -579,6 +585,55 @@ def test_range_report_from_cache_and_render() -> None:
     print("OK: range_report_from_cache + render_range_report_md + range_report_page")
 
 
+class _PoisonClient:
+    """Любое обращение к атрибуту 'падает' - используется, чтобы доказать, что
+
+    для уже закэшированного периода build_range_report НЕ ходит в Garmin API
+    (регрессия на баг, из-за которого period-отчёт всегда пересобирался
+    заново, даже если данные уже были синхронизированы - см. sync.py)."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(
+            f"Неожиданное обращение к Garmin API (client.{name}) для уже закэшированного прошедшего дня"
+        )
+
+
+def test_sync_module_wiring() -> None:
+    assert callable(sync_days)
+    assert callable(sync_recent_days)
+    print("OK: sync.py экспортирует sync_days/sync_recent_days")
+
+
+def test_build_range_report_skips_already_cached_past_days() -> None:
+    """Прошедшие дни, уже засинканные в кэш (weekly/daily/sync/предыдущий
+
+    range-запрос), не должны повторно тянуться из Garmin API - иначе отчёт
+    за период никогда не станет "мгновенным", как у самого Garmin Connect."""
+    from datetime import date, timedelta
+
+    # Большой offset, чтобы гарантированно не пересечься с другими тестами
+    # этого файла, которые используют фиксированные даты в июле 2026 и
+    # date.today() - 1 (test_analyze_surface) - иначе activities_count может
+    # случайно захватить чужую тестовую активность на той же дате.
+    d1 = (date.today() - timedelta(days=200)).isoformat()
+    d2 = (date.today() - timedelta(days=199)).isoformat()
+    with get_connection() as conn:
+        upsert_daily_metrics(conn, DailyMetrics(date=d1, steps=5000, distance_m=4000.0, sleep_hours=7.0))
+        upsert_daily_metrics(conn, DailyMetrics(date=d2, steps=6000, distance_m=4500.0, sleep_hours=6.5))
+        upsert_activity(
+            conn,
+            ActivitySummary(activity_id="cached-1", date=d1, activity_type="running", distance_km=5.0, duration_s=1500),
+        )
+
+    # _PoisonClient падает при любом обращении - если сюда дойдёт хоть один
+    # вызов collect_daily/search_activities, тест упадёт с понятной ошибкой.
+    report = build_range_report(_PoisonClient(), d1, d2)
+    assert report["steps_total"] == 11000
+    assert report["distance_total_m"] == 8500.0
+    assert report["activities_count"] == 1
+    print("OK: build_range_report не трогает Garmin API для уже закэшированного прошедшего периода ->", report["steps_total"])
+
+
 def test_index() -> None:
     path = update_index()
     assert path.exists()
@@ -605,6 +660,8 @@ if __name__ == "__main__":
     test_activity_icon_and_label()
     test_aggregate_by_type_live_dicts()
     test_range_report_from_cache_and_render()
+    test_sync_module_wiring()
+    test_build_range_report_skips_already_cached_past_days()
     test_raw_payload_roundtrip()
     test_analyze_surface()
     test_monthly_rollup()

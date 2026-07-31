@@ -101,36 +101,50 @@ def _build_report(
 
 
 def build_range_report(client: Garmin, date_from: str, date_to: str) -> dict[str, Any]:
-    """Тянет каждый день периода из Garmin API (как weekly/context), кэширует
+    """Инкрементально дособирает период и агрегирует из кэша.
 
-    и агрегирует. Используется при первом построении отчёта (веб-дашборд,
-    CLI) - после этого `range_report_from_cache` может перечитывать тот же
-    период без повторных обращений к Garmin.
+    Раньше эта функция всегда перетягивала все дни периода из Garmin API -
+    даже если они уже были в кэше (например, после weekly/daily-отчёта или
+    предыдущего range-запроса на пересекающийся период). Это лишний трафик
+    и медленно, а сама по себе выборка за произвольный период дат - базовая
+    операция, которая должна быть "мгновенной" (примерно как графики за
+    несколько дней в самом Garmin Connect), а не требовать пересбора каждый
+    раз. Поэтому сейчас идём в API только за:
+    - днями, которых ещё нет в кэше;
+    - сегодняшним днём - его метрики (шаги, сон и т.д.) в течение дня ещё
+      меняются, поэтому его обновляем всегда, даже если он уже был закэширован.
+
+    Если период целиком уже синхронизирован (см. sync.py и Task Scheduler-
+    задачу scripts/register_daily_sync_task.ps1) - обращений к Garmin вообще
+    не будет, отчёт соберётся из локальной SQLite мгновенно.
     """
     days = daterange(date_from, date_to)
-    daily_table: list[dict[str, Any]] = []
-    activities: list[dict[str, Any]] = []
+    today = date_cls.today()
+    past_days = [d for d in days if date_cls.fromisoformat(d) <= today]
 
     with get_connection() as conn:
-        for day in days:
-            if date_cls.fromisoformat(day) > date_cls.today():
-                continue  # будущая дата в диапазоне - пропускаем
-            bundle = collect_daily(client, day, with_activity_splits=False, conn=conn)
-            upsert_daily_metrics(conn, bundle.to_cache_metrics())
-            daily_table.append(bundle.as_summary_row())
-            for act in bundle.activities:
-                upsert_activity(conn, _activity_to_summary(act))
-                activities.append(act)
+        cached_dates = {r["date"] for r in get_daily_metrics_range(conn, date_from, date_to)}
 
-    return _build_report(date_from, date_to, days, daily_table, activities)
+    missing_days = [d for d in past_days if d not in cached_dates or date_cls.fromisoformat(d) == today]
+
+    if missing_days:
+        with get_connection() as conn:
+            for day in missing_days:
+                bundle = collect_daily(client, day, with_activity_splits=False, conn=conn)
+                upsert_daily_metrics(conn, bundle.to_cache_metrics())
+                for act in bundle.activities:
+                    upsert_activity(conn, _activity_to_summary(act))
+
+    return range_report_from_cache(date_from, date_to)
 
 
 def range_report_from_cache(date_from: str, date_to: str) -> dict[str, Any]:
-    """Тот же отчёт, но только по уже закэшированным данным - без обращения
+    """Тот же отчёт, но целиком по уже закэшированным данным - без обращения
 
-    к Garmin API. Подходит для повторного открытия страницы отчёта (см.
-    webapp/app.py, GET /range) после того, как build_range_report уже был
-    вызван хотя бы раз для этого периода - быстро и не расходует лимиты API.
+    к Garmin API вообще (не нужен даже клиент). Подходит для страницы отчёта
+    (см. webapp/app.py, GET /range) после того, как период был синхронизирован
+    - через build_range_report, weekly/daily/context-отчёты или фоновую
+    sync.py - быстро, offline-friendly и не расходует лимиты API.
     """
     days = daterange(date_from, date_to)
     with get_connection() as conn:

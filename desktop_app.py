@@ -29,6 +29,7 @@ from garmin_pipeline.webapp.app import create_app
 HOST = "127.0.0.1"
 PORT = int(os.getenv("GARMIN_PIPELINE_PORT", "8765"))
 _STARTUP_DELAY_S = 1.5  # даём uvicorn поднять сокет перед открытием браузера
+_SYNC_INTERVAL_S = 6 * 3600  # раз в 6 часов, пока приложение открыто
 
 
 def _fix_windows_console_encoding() -> None:
@@ -68,12 +69,35 @@ def _run_bot_if_configured() -> None:
         logging.exception("Telegram-бот завершился с ошибкой")
 
 
+def _run_background_sync() -> None:
+    """Держит локальный кэш "тёплым", пока открыт GUI-дистрибутив - без этого
+
+    отчёт за произвольный период (/range) при первом заходе за новый день
+    придётся собирать вживую из Garmin API вместо мгновенного чтения из
+    кэша (см. collectors/sync.py и обоснование в collectors/range_report.py).
+    В CLI-дистрибутиве та же роль у Task Scheduler-задачи
+    scripts/register_daily_sync_task.ps1 - здесь она не нужна, т.к. exe не
+    гарантированно запущен по расписанию, зато обычно долго открыт.
+    """
+    from garmin_pipeline.client import get_client
+    from garmin_pipeline.collectors.sync import sync_recent_days
+
+    while True:
+        if config.settings.email:
+            try:
+                sync_recent_days(get_client(interactive=False), days=3)
+            except Exception:
+                logging.exception("Фоновая синхронизация кэша завершилась с ошибкой")
+        time.sleep(_SYNC_INTERVAL_S)
+
+
 def main() -> None:
     _fix_windows_console_encoding()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     threading.Thread(target=_run_web_server, name="webapp", daemon=True).start()
     threading.Thread(target=_run_bot_if_configured, name="telegram-bot", daemon=True).start()
+    threading.Thread(target=_run_background_sync, name="cache-sync", daemon=True).start()
 
     time.sleep(_STARTUP_DELAY_S)
     target_path = "/dashboard" if config.settings.email else "/setup"

@@ -7,6 +7,7 @@
     python -m garmin_pipeline.cli daily --date 2026-07-12
     python -m garmin_pipeline.cli context --days 14
     python -m garmin_pipeline.cli range --from 2026-07-18 --to 2026-07-31
+    python -m garmin_pipeline.cli sync --days 3
     python -m garmin_pipeline.cli activity search --latest
     python -m garmin_pipeline.cli activity search --date 2026-07-05 --type running
     python -m garmin_pipeline.cli activity export --latest
@@ -42,6 +43,7 @@ from garmin_pipeline.collectors.fit import compute_km_splits_with_fallback
 from garmin_pipeline.collectors.context import build_context
 from garmin_pipeline.collectors.daily import collect_daily
 from garmin_pipeline.collectors.range_report import build_range_report
+from garmin_pipeline.collectors.sync import sync_recent_days
 from garmin_pipeline.collectors.weekly import _activity_to_summary, build_weekly_report  # noqa: F401 (переиспользуем агрегатор)
 from garmin_pipeline.collectors.workouts import create_and_schedule
 from garmin_pipeline.formatting import (
@@ -121,6 +123,19 @@ def cmd_range(args: argparse.Namespace) -> int:
     path = write_range_report(args.date_from, args.date_to, content)
     update_index()
     print(f"Отчёт за период записан: {path}")
+    return 0
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    """Фоновая синхронизация кэша без записи файлов - см. collectors/sync.py.
+
+    Гоняется вручную или по расписанию (scripts/register_daily_sync_task.ps1),
+    чтобы отчёты за произвольный период (`range`) собирались из уже тёплого
+    кэша, а не тянули Garmin API заново при каждом запросе.
+    """
+    client = get_client(interactive=False)
+    n = sync_recent_days(client, days=args.days)
+    print(f"Кэш обновлён за последние {n} дн.")
     return 0
 
 
@@ -275,6 +290,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_range.add_argument("--from", dest="date_from", required=True, help="YYYY-MM-DD")
     p_range.add_argument("--to", dest="date_to", required=True, help="YYYY-MM-DD")
     p_range.set_defaults(func=cmd_range)
+
+    p_sync = sub.add_parser(
+        "sync", help="Фоновая синхронизация кэша за последние N дней (без записи файлов)"
+    )
+    p_sync.add_argument("--days", type=int, default=3, help="Сколько последних дней синхронизировать (по умолчанию 3)")
+    p_sync.set_defaults(func=cmd_sync)
 
     p_activity = sub.add_parser("activity", help="Поиск/экспорт конкретных тренировок")
     activity_sub = p_activity.add_subparsers(dest="activity_command", required=True)
