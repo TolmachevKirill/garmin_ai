@@ -88,6 +88,25 @@ def fmt_num(value: float | int | None, unit: str = "", digits: int = 0) -> str:
     return f"{int(round(value))}{unit}"
 
 
+def fmt_exercise_sets_lines(exercise_sets: dict[str, Any] | None) -> list[str]:
+    """Строки с разбивкой по упражнениям (сеты/повторы/вес) - для strength/
+
+    cardio-тренировок, где Garmin распознал сеты (см. collectors.activity.
+    get_exercise_sets). Пустой список, если данных нет."""
+    exercises = (exercise_sets or {}).get("exercises") or []
+    if not exercises:
+        return []
+    lines = [
+        f"Силовые сеты: {exercise_sets['active_sets']} подходов "
+        f"(актив {fmt_duration(exercise_sets['total_active_s'])}, "
+        f"отдых {fmt_duration(exercise_sets['total_rest_s'])}):"
+    ]
+    for ex in sorted(exercises, key=lambda e: e["sets"], reverse=True):
+        weight_part = f", вес до {ex['weight_kg']:.1f} кг" if ex.get("weight_kg") else ""
+        lines.append(f"- {ex['name']}: {ex['sets']} подх., {ex['reps_total']} повт.{weight_part}")
+    return lines
+
+
 _ACTIVITY_ICONS: dict[str, str] = {
     "running": "🏃", "trail_running": "🏃", "treadmill_running": "🏃", "track_running": "🏃",
     "walking": "🚶", "casual_walking": "🚶", "speed_walking": "🚶", "hiking": "🥾",
@@ -234,6 +253,7 @@ def render_daily_md(day: dict[str, Any]) -> str:
             splits = act.get("splits_pace")
             if splits:
                 lines.append(f"Сплиты по км: {', '.join(splits)}")
+            lines.extend(fmt_exercise_sets_lines(act.get("exercise_sets")))
     else:
         lines.append("")
         lines.append("Тренировок в этот день не было.")
@@ -360,6 +380,8 @@ def render_context_md(context: dict[str, Any]) -> str:
                 f"{fmt_duration(act.get('duration_s'))}, {tempo}, "
                 f"avg HR {fmt_num(act.get('avg_hr'))}"
             )
+            for set_line in fmt_exercise_sets_lines(act.get("exercise_sets")):
+                lines.append(f"  {set_line}")
 
     return "\n".join(lines) + "\n"
 
@@ -408,6 +430,11 @@ def render_activity_md(act: dict[str, Any]) -> str:
                 f"- {s.get('index')}: {fmt_tempo(s.get('pace_s_per_km'), act.get('type'))}, "
                 f"HR {fmt_num(s.get('avg_hr'))}"
             )
+
+    exercise_set_lines = fmt_exercise_sets_lines(act.get("exercise_sets"))
+    if exercise_set_lines:
+        lines.append("")
+        lines.extend(exercise_set_lines)
 
     hr_zones = [z for z in (act.get("hr_zones") or []) if z.get("seconds")]
     if hr_zones:

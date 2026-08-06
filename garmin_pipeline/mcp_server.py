@@ -25,7 +25,13 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from garmin_pipeline.client import get_client
-from garmin_pipeline.collectors.activity import fetch_activity_records, get_hr_zones, search_activities
+from garmin_pipeline.collectors.activity import (
+    fetch_activity_records,
+    get_exercise_sets,
+    get_hr_zones,
+    is_set_based_activity,
+    search_activities,
+)
 from garmin_pipeline.collectors.export import export_raw_range
 from garmin_pipeline.collectors.fit import compute_km_splits_with_fallback
 from garmin_pipeline.collectors.range_report import build_range_report
@@ -117,8 +123,10 @@ def get_activity_detail(activity_id: str) -> dict[str, Any]:
     """Полная детализация одной тренировки по её activity_id (см. find_activities):
 
     сплиты по км (из оригинального FIT-файла, с фолбэком на пересчёт из
-    time-series) и распределение по пульсовым зонам, в дополнение к базовым
-    полям из get_activities."""
+    time-series), распределение по пульсовым зонам, а для силовых/кардио
+    тренировок (strength_training, hiit, ...) - ещё и exercise_sets: разбивка
+    по упражнениям с числом подходов/повторов и весом (кг), если устройство
+    их распознало, в дополнение к базовым полям из get_activities."""
     client = get_client(interactive=False)
     candidates = search_activities(client, activity_id=activity_id, limit=1)
     if not candidates:
@@ -127,6 +135,8 @@ def get_activity_detail(activity_id: str) -> dict[str, Any]:
     records = fetch_activity_records(client, activity_id)
     act["splits"] = compute_km_splits_with_fallback(client, activity_id, records)
     act["hr_zones"] = get_hr_zones(client, activity_id)
+    if is_set_based_activity(act.get("type")):
+        act["exercise_sets"] = get_exercise_sets(client, activity_id)
     return act
 
 

@@ -14,7 +14,12 @@ from typing import Any
 from garminconnect import Garmin
 
 from garmin_pipeline.cache import DailyMetrics, get_connection, save_raw_payload
-from garmin_pipeline.collectors.activity import fetch_activity_records, search_activities
+from garmin_pipeline.collectors.activity import (
+    fetch_activity_records,
+    get_exercise_sets,
+    is_set_based_activity,
+    search_activities,
+)
 from garmin_pipeline.collectors.fit import compute_km_splits_with_fallback
 from garmin_pipeline.formatting import fmt_speed_kmh, uses_speed_not_pace
 
@@ -166,6 +171,8 @@ def collect_daily(
                     act["splits_pace"] = [
                         _fmt_pace(s["pace_s_per_km"]) for s in splits if s.get("pace_s_per_km")
                     ]
+            elif is_set_based_activity(act.get("type")):
+                act["exercise_sets"] = get_exercise_sets(client, act["activity_id"], conn=c)
             bundle.activities.append(act)
 
     return bundle

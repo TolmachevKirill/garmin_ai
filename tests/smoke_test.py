@@ -34,7 +34,11 @@ from garmin_pipeline.cache import (  # noqa: E402
     upsert_activity,
     upsert_daily_metrics,
 )
-from garmin_pipeline.collectors.activity import compute_km_splits  # noqa: E402
+from garmin_pipeline.collectors.activity import (  # noqa: E402
+    compute_km_splits,
+    get_exercise_sets,
+    is_set_based_activity,
+)
 from garmin_pipeline.collectors.daily import DailyBundle  # noqa: E402
 from garmin_pipeline.collectors.weekly import _aggregate_activities, _mean  # noqa: E402
 from garmin_pipeline.collectors.range_report import (  # noqa: E402
@@ -48,6 +52,7 @@ from garmin_pipeline.formatting import (  # noqa: E402
     activity_icon,
     activity_label_ru,
     fmt_duration,
+    fmt_exercise_sets_lines,
     render_activity_md,
     render_context_md,
     render_daily_md,
@@ -517,6 +522,91 @@ def test_activity_icon_and_label() -> None:
     print("OK: activity_icon + activity_label_ru")
 
 
+def test_exercise_sets_parsing_and_rendering() -> None:
+    """get_exercise_sets агрегирует ACTIVE-сеты по упражнению (сеты/повторы/
+
+    вес в кг), игнорирует REST, кэширует сырой ответ в raw_payloads и не
+    дёргает Garmin API повторно - см. пользовательский вопрос 'а разве на
+    силовой не должны учитываться веса/повторы для анализа'."""
+
+    class _FakeStrengthClient:
+        calls = 0
+
+        def get_activity_exercise_sets(self, activity_id):
+            self.calls += 1
+            return {
+                "activityId": int(activity_id),
+                "exerciseSets": [
+                    {
+                        "exercises": [{"category": "SQUAT", "name": None, "probability": 66.4}],
+                        "duration": 68.5, "repetitionCount": 20, "weight": 5000.0,
+                        "setType": "ACTIVE",
+                    },
+                    {
+                        "exercises": [], "duration": 63.5, "repetitionCount": None,
+                        "weight": None, "setType": "REST",
+                    },
+                    {
+                        "exercises": [{"category": "SQUAT", "name": None, "probability": 70.0}],
+                        "duration": 71.6, "repetitionCount": 20, "weight": 7500.0,
+                        "setType": "ACTIVE",
+                    },
+                    {
+                        "exercises": [
+                            {"category": "TRICEPS_EXTENSION", "name": None, "probability": 99.6},
+                            {"category": "PULL_UP", "name": "EZ_BAR_PULLOVER", "probability": 20.0},
+                        ],
+                        "duration": 82.5, "repetitionCount": 22, "weight": None,
+                        "setType": "ACTIVE",
+                    },
+                ],
+            }
+
+    assert is_set_based_activity("strength_training")
+    assert is_set_based_activity("hiit")
+    assert not is_set_based_activity("running")
+    assert not is_set_based_activity(None)
+
+    client = _FakeStrengthClient()
+    with get_connection() as conn:
+        sets = get_exercise_sets(client, "555555", conn=conn)
+        assert client.calls == 1
+        # Повторный вызов той же активности - из raw_payloads, без нового API-вызова
+        sets_again = get_exercise_sets(client, "555555", conn=conn)
+        assert client.calls == 1
+        assert sets_again == sets
+
+    assert sets["active_sets"] == 3
+    assert sets["rest_sets"] == 1
+    assert sets["total_rest_s"] == 63.5
+    by_name = {e["name"]: e for e in sets["exercises"]}
+    assert by_name["Squat"]["sets"] == 2
+    assert by_name["Squat"]["reps_total"] == 40
+    assert by_name["Squat"]["weight_kg"] == 7.5  # max(5.0, 7.5) кг - вес переведён из граммов
+    # Лейбл берётся у экземпляра exercises[] с наибольшей probability в сете
+    # (TRICEPS_EXTENSION 99.6% > PULL_UP/EZ_BAR_PULLOVER 20%) - имя (`name`)
+    # добавляется в скобках, только если оно есть у *этого* экземпляра.
+    assert by_name["Triceps Extension"]["sets"] == 1
+
+    lines = fmt_exercise_sets_lines(sets)
+    joined = "\n".join(lines)
+    assert "Силовые сеты" in joined
+    assert "Squat" in joined and "7.5 кг" in joined
+
+    # Пустой/отсутствующий exercise_sets не ломает рендер (бег и т.п.)
+    assert fmt_exercise_sets_lines(None) == []
+    assert fmt_exercise_sets_lines({"exercises": []}) == []
+
+    md = render_activity_md(
+        {
+            "activity_id": "555555", "date": "2026-08-06", "type": "strength_training",
+            "name": "Сил. трен.", "duration_s": 6060, "avg_hr": 105, "exercise_sets": sets,
+        }
+    )
+    assert "Силовые сеты" in md and "Squat" in md
+    print("OK: get_exercise_sets + fmt_exercise_sets_lines + render_activity_md ->", sets["exercises"])
+
+
 def test_aggregate_by_type_live_dicts() -> None:
     """_aggregate_by_type должен одинаково работать и на 'живых' словарях
 
@@ -727,6 +817,7 @@ if __name__ == "__main__":
     test_aggregate_and_mean()
     test_aggregate_excludes_low_signal_types()
     test_activity_icon_and_label()
+    test_exercise_sets_parsing_and_rendering()
     test_aggregate_by_type_live_dicts()
     test_range_report_from_cache_and_render()
     test_sync_module_wiring()

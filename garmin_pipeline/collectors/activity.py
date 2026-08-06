@@ -256,6 +256,106 @@ def get_hr_zones(
     return result
 
 
+# Типы активностей, у которых Garmin может распознавать отдельные силовые
+# сеты (упражнение/повторы/вес) через акселерометр устройства - см.
+# get_exercise_sets. Для остальных типов (бег, плавание, ...) этот эндпоинт
+# всегда пустой, поэтому не дёргаем его зря.
+_SET_BASED_TYPES = {
+    "strength_training", "cardio_training", "indoor_cardio", "hiit",
+    "crossfit", "bootcamp", "mixed_martial_arts", "boxing",
+}
+
+
+def is_set_based_activity(activity_type: str | None) -> bool:
+    return bool(activity_type) and activity_type in _SET_BASED_TYPES
+
+
+def get_exercise_sets(
+    client: Garmin, activity_id: str, *, conn: sqlite3.Connection | None = None
+) -> dict[str, Any]:
+    """Силовые сеты (упражнение/повторы/вес) - для strength/cardio-тренировок,
+
+    где устройство их распознаёт по акселерометру (см. is_set_based_activity).
+
+    Сырой ответ get_activity_exercise_sets кэшируется в raw_payloads (endpoint
+    "exercise_sets") - повторный запрос той же активности не бьёт по Garmin
+    API снова. Возвращает {} если у активности нет сетов (не тот тип
+    активности, ручная запись, старое устройство без детекции упражнений и
+    т.п.) - вызывающий код должен просто пропустить рендер этого блока.
+
+    Формат возврата:
+        {
+            "active_sets": int, "rest_sets": int,
+            "total_active_s": float, "total_rest_s": float,
+            "exercises": [
+                {"name": "Curl", "sets": 3, "reps_total": 60,
+                 "weight_kg": 5.0 | None, "duration_s": 240.1},
+                ...
+            ],
+        }
+    """
+    with (nullcontext(conn) if conn is not None else get_connection()) as c:
+        raw = get_raw_payload(c, "exercise_sets", activity_id)
+        if raw is None:
+            try:
+                raw = client.get_activity_exercise_sets(activity_id)
+            except Exception:
+                return {}
+            save_raw_payload(c, "exercise_sets", activity_id, raw)
+
+    sets = (raw or {}).get("exerciseSets") or []
+    if not sets:
+        return {}
+
+    def _label(exercises: list[dict[str, Any]]) -> str | None:
+        if not exercises:
+            return None
+        best = max(exercises, key=lambda e: e.get("probability") or 0)
+        category = (best.get("category") or "").replace("_", " ").strip().title()
+        name = best.get("name")
+        if name:
+            return f"{category} ({name.replace('_', ' ').strip().title()})"
+        return category or None
+
+    exercises_agg: dict[str, dict[str, Any]] = {}
+    total_active_s = 0.0
+    total_rest_s = 0.0
+    active_sets = 0
+    rest_sets = 0
+
+    for s in sets:
+        duration = s.get("duration") or 0.0
+        if s.get("setType") == "REST":
+            rest_sets += 1
+            total_rest_s += duration
+            continue
+        active_sets += 1
+        total_active_s += duration
+        label = _label(s.get("exercises")) or "Упражнение не распознано"
+        agg = exercises_agg.setdefault(
+            label,
+            {"name": label, "sets": 0, "reps_total": 0, "weight_kg": None, "duration_s": 0.0},
+        )
+        agg["sets"] += 1
+        reps = s.get("repetitionCount")
+        if reps:
+            agg["reps_total"] += reps
+        weight = s.get("weight")
+        if weight:
+            # Garmin отдаёт вес в граммах.
+            weight_kg = weight / 1000.0
+            agg["weight_kg"] = weight_kg if agg["weight_kg"] is None else max(agg["weight_kg"], weight_kg)
+        agg["duration_s"] += duration
+
+    return {
+        "active_sets": active_sets,
+        "rest_sets": rest_sets,
+        "total_active_s": round(total_active_s, 1),
+        "total_rest_s": round(total_rest_s, 1),
+        "exercises": list(exercises_agg.values()),
+    }
+
+
 def _extract_time_series(details: dict[str, Any]) -> list[dict[str, Any]]:
     descriptors = details.get("metricDescriptors") or []
     index_by_key = {

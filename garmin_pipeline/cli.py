@@ -37,7 +37,9 @@ from garmin_pipeline.cache import get_connection, upsert_activity, upsert_daily_
 from garmin_pipeline.client import GarminLoginError, get_client
 from garmin_pipeline.collectors.activity import (
     fetch_activity_records,
+    get_exercise_sets,
     get_hr_zones,
+    is_set_based_activity,
     search_activities,
     write_activity_csv,
 )
@@ -218,6 +220,8 @@ def cmd_activity_export(args: argparse.Namespace) -> int:
     csv_path, rows = write_activity_csv(records, activity_csv_path(stem))
     act["splits"] = compute_km_splits_with_fallback(client, act["activity_id"], records)
     act["hr_zones"] = get_hr_zones(client, act["activity_id"])
+    if is_set_based_activity(act.get("type")):
+        act["exercise_sets"] = get_exercise_sets(client, act["activity_id"])
     act["csv_filename"] = csv_path.name if csv_path else None
 
     content = render_activity_md(act)

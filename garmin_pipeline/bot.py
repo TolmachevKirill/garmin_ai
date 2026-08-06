@@ -24,7 +24,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from garmin_pipeline import config, llm_client
 from garmin_pipeline.client import get_client
-from garmin_pipeline.collectors.activity import search_activities
+from garmin_pipeline.collectors.activity import get_exercise_sets, is_set_based_activity, search_activities
 from garmin_pipeline.collectors.context import build_context
 from garmin_pipeline.collectors.daily import collect_daily
 from garmin_pipeline.collectors.weekly import build_weekly_report
@@ -112,7 +112,10 @@ async def cmd_activity(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "Нашлось несколько тренировок, уточни запрос:\n" + "\n".join(lines)
         )
         return
-    await _reply_long(update, render_activity_md(candidates[0]))
+    act = candidates[0]
+    if is_set_based_activity(act.get("type")):
+        act["exercise_sets"] = await asyncio.to_thread(get_exercise_sets, client, act["activity_id"])
+    await _reply_long(update, render_activity_md(act))
 
 
 async def handle_free_text(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
