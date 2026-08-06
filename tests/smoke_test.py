@@ -588,10 +588,19 @@ def test_exercise_sets_parsing_and_rendering() -> None:
     # добавляется в скобках, только если оно есть у *этого* экземпляра.
     assert by_name["Triceps Extension"]["sets"] == 1
 
+    # Карта мышц: считаем сами по справочнику категорий (Garmin её через API не
+    # отдаёт - см. _CATEGORY_MUSCLE_GROUPS). 2 приседания -> quadriceps+glutes,
+    # 1 трицепс -> triceps => "Квадрицепс"/"Ягодицы" по 2 подхода, "Трицепс" - 1.
+    by_muscle = {m["name"]: m["sets"] for m in sets["muscle_groups"]}
+    assert by_muscle["Квадрицепс"] == 2
+    assert by_muscle["Ягодицы"] == 2
+    assert by_muscle["Трицепс"] == 1
+
     lines = fmt_exercise_sets_lines(sets)
     joined = "\n".join(lines)
     assert "Силовые сеты" in joined
     assert "Squat" in joined and "7.5 кг" in joined
+    assert "Мышечные группы" in joined and "Квадрицепс" in joined
 
     # Пустой/отсутствующий exercise_sets не ломает рендер (бег и т.п.)
     assert fmt_exercise_sets_lines(None) == []

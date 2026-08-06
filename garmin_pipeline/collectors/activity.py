@@ -270,6 +270,78 @@ def is_set_based_activity(activity_type: str | None) -> bool:
     return bool(activity_type) and activity_type in _SET_BASED_TYPES
 
 
+# Garmin Connect показывает "карту мышц" (силуэт тела с подсветкой) на странице
+# силовой тренировки, но это чисто клиентская фича веб/моб-приложения - никакого
+# отдельного API-эндпоинта для неё нет (проверено: get_activity/get_activity_
+# exercise_sets/get_activity_details не содержат ни одного поля про мышцы).
+# Соответствие "категория упражнения -> группы мышц" ниже построено по тому же
+# справочнику категорий, что использует сам Garmin (FIT SDK `exercise_category`
+# enum - те же значения, что приходят в exerciseSets[].exercises[].category,
+# см. fitdecode.profile.FIELD_TYPES['exercise_category']).
+_MUSCLE_GROUPS_RU: dict[str, str] = {
+    "chest": "Грудь", "back": "Спина", "shoulders": "Плечи", "biceps": "Бицепс",
+    "triceps": "Трицепс", "forearms": "Предплечья", "core": "Кор/пресс",
+    "quadriceps": "Квадрицепс", "hamstrings": "Задняя поверхность бедра",
+    "glutes": "Ягодицы", "calves": "Икры", "legs": "Ноги (общее)",
+    "full_body": "Всё тело", "cardio": "Кардио/выносливость",
+}
+
+_CATEGORY_MUSCLE_GROUPS: dict[str, tuple[str, ...]] = {
+    "bench_press": ("chest", "triceps", "shoulders"),
+    "calf_raise": ("calves",),
+    "cardio": ("cardio",),
+    "carry": ("core", "forearms", "full_body"),
+    "chop": ("core", "shoulders"),
+    "core": ("core",),
+    "crunch": ("core",),
+    "curl": ("biceps",),
+    "deadlift": ("back", "hamstrings", "glutes"),
+    "flye": ("chest", "shoulders"),
+    "hip_raise": ("glutes", "hamstrings"),
+    "hip_stability": ("glutes", "core"),
+    "hip_swing": ("glutes", "hamstrings"),
+    "hyperextension": ("back", "glutes"),
+    "lateral_raise": ("shoulders",),
+    "leg_curl": ("hamstrings",),
+    "leg_raise": ("core",),
+    "lunge": ("quadriceps", "glutes"),
+    "olympic_lift": ("full_body",),
+    "plank": ("core",),
+    "plyo": ("legs", "full_body"),
+    "pull_up": ("back", "biceps"),
+    "push_up": ("chest", "triceps", "core"),
+    "row": ("back", "biceps"),
+    "shoulder_press": ("shoulders", "triceps"),
+    "shoulder_stability": ("shoulders",),
+    "shrug": ("shoulders",),
+    "sit_up": ("core",),
+    "squat": ("quadriceps", "glutes"),
+    "total_body": ("full_body",),
+    "triceps_extension": ("triceps",),
+    "warm_up": ("cardio",),
+    "run": ("cardio", "legs"),
+    "bike": ("cardio", "legs"),
+    "cardio_sensors": ("cardio",),
+    "move": ("cardio",),
+    "pose": ("core",),
+    "banded_exercises": ("full_body",),
+    "battle_rope": ("cardio", "shoulders", "core"),
+    "elliptical": ("cardio", "legs"),
+    "floor_climb": ("cardio", "full_body"),
+    "indoor_bike": ("cardio", "legs"),
+    "indoor_row": ("cardio", "back", "legs"),
+    "ladder": ("cardio", "legs"),
+    "sandbag": ("full_body",),
+    "sled": ("legs", "full_body"),
+    "sledge_hammer": ("full_body", "core"),
+    "stair_stepper": ("cardio", "legs"),
+    "suspension": ("full_body",),
+    "tire": ("full_body",),
+    "run_indoor": ("cardio", "legs"),
+    "bike_outdoor": ("cardio", "legs"),
+}
+
+
 def get_exercise_sets(
     client: Garmin, activity_id: str, *, conn: sqlite3.Connection | None = None
 ) -> dict[str, Any]:
@@ -292,6 +364,11 @@ def get_exercise_sets(
                  "weight_kg": 5.0 | None, "duration_s": 240.1},
                 ...
             ],
+            "muscle_groups": [
+                {"name": "Спина", "sets": 8},
+                ...
+            ],  # см. _CATEGORY_MUSCLE_GROUPS - Garmin своей "карты мышц" через
+                # API не отдаёт (это чисто UI-фича), считаем сами по категориям
         }
     """
     with (nullcontext(conn) if conn is not None else get_connection()) as c:
@@ -307,17 +384,25 @@ def get_exercise_sets(
     if not sets:
         return {}
 
-    def _label(exercises: list[dict[str, Any]]) -> str | None:
+    def _best_exercise(exercises: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+        """Возвращает (сырая_категория_lowercase, человекочитаемый_лейбл) для
+
+        exercises[] одного сета - берём вариант с наибольшей probability
+        (Garmin в каждом сете присылает несколько кандидатов-распознаваний)."""
         if not exercises:
-            return None
+            return None, None
         best = max(exercises, key=lambda e: e.get("probability") or 0)
-        category = (best.get("category") or "").replace("_", " ").strip().title()
+        category_raw = (best.get("category") or "").strip().lower()
+        category_pretty = category_raw.replace("_", " ").title() if category_raw else None
         name = best.get("name")
         if name:
-            return f"{category} ({name.replace('_', ' ').strip().title()})"
-        return category or None
+            label = f"{category_pretty} ({name.replace('_', ' ').strip().title()})" if category_pretty else None
+        else:
+            label = category_pretty
+        return category_raw or None, label
 
     exercises_agg: dict[str, dict[str, Any]] = {}
+    muscle_sets: dict[str, int] = {}
     total_active_s = 0.0
     total_rest_s = 0.0
     active_sets = 0
@@ -331,7 +416,8 @@ def get_exercise_sets(
             continue
         active_sets += 1
         total_active_s += duration
-        label = _label(s.get("exercises")) or "Упражнение не распознано"
+        category_raw, label = _best_exercise(s.get("exercises"))
+        label = label or "Упражнение не распознано"
         agg = exercises_agg.setdefault(
             label,
             {"name": label, "sets": 0, "reps_total": 0, "weight_kg": None, "duration_s": 0.0},
@@ -347,12 +433,21 @@ def get_exercise_sets(
             agg["weight_kg"] = weight_kg if agg["weight_kg"] is None else max(agg["weight_kg"], weight_kg)
         agg["duration_s"] += duration
 
+        for group in _CATEGORY_MUSCLE_GROUPS.get(category_raw or "", ()):
+            muscle_sets[group] = muscle_sets.get(group, 0) + 1
+
+    muscle_groups = [
+        {"name": _MUSCLE_GROUPS_RU.get(group, group), "sets": count}
+        for group, count in sorted(muscle_sets.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+
     return {
         "active_sets": active_sets,
         "rest_sets": rest_sets,
         "total_active_s": round(total_active_s, 1),
         "total_rest_s": round(total_rest_s, 1),
         "exercises": list(exercises_agg.values()),
+        "muscle_groups": muscle_groups,
     }
 
 

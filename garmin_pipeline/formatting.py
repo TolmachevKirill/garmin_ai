@@ -104,6 +104,11 @@ def fmt_exercise_sets_lines(exercise_sets: dict[str, Any] | None) -> list[str]:
     for ex in sorted(exercises, key=lambda e: e["sets"], reverse=True):
         weight_part = f", вес до {ex['weight_kg']:.1f} кг" if ex.get("weight_kg") else ""
         lines.append(f"- {ex['name']}: {ex['sets']} подх., {ex['reps_total']} повт.{weight_part}")
+
+    muscle_groups = (exercise_sets or {}).get("muscle_groups") or []
+    if muscle_groups:
+        summary = ", ".join(f"{g['name']} ({g['sets']} подх.)" for g in muscle_groups)
+        lines.append(f"Мышечные группы: {summary}")
     return lines
 
 
