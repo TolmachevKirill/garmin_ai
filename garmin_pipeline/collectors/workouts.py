@@ -27,6 +27,7 @@ try:
         ExecutableStep,
         RepeatGroup,
         RunningWorkout,
+        TargetType,
         WorkoutSegment,
         create_cooldown_step,
         create_interval_step,
@@ -50,6 +51,22 @@ _SPORT_TYPES = {
     "running": {"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1},
     "cycling": {"sportTypeId": 2, "sportTypeKey": "cycling", "displayOrder": 2},
 }
+
+# HR-зона как таргет шага (см. spec["hr_zone"] в _build_step) - часы дают
+# оповещение (вибро/сигнал), когда пульс выходит за пределы этой зоны во
+# время шага. ВАЖНО: сама граница/значение зоны (bpm) не передаётся - Garmin
+# использует "zoneNumber" (1-5), а не targetValueOne/targetValueTwo (те поля
+# зарезервированы под абсолютные диапазоны - темп в м/с, мощность в ваттах;
+# если положить туда bpm, часы трактуют их как темп и получается мусор вида
+# "11 сек/милю" - см. https://github.com/cyberjunky/python-garminconnect/issues/333).
+# Реальные границы зоны 1-5 в bpm/% ЧСС берутся из личного профиля пользователя
+# в Garmin Connect (Настройки -> Пульс -> Зоны ЧСС) - шаг просто ссылается на
+# номер зоны, а не задаёт число ударов сам.
+_HR_ZONE_TARGET_TYPE: dict[str, Any] = {
+    "workoutTargetTypeId": TargetType.HEART_RATE_ZONE,
+    "workoutTargetTypeKey": "heart.rate.zone",
+    "displayOrder": 4,
+} if WORKOUT_SUPPORT else {}
 
 
 class _StepOrderCounter:
@@ -75,7 +92,16 @@ def _build_step(spec: dict[str, Any], counter: _StepOrderCounter) -> "Executable
     builder = _STEP_BUILDERS.get(kind)
     if builder is None:
         raise ValueError(f"Неизвестный тип шага: {kind!r} (ожидались warmup/interval/recovery/cooldown/repeat)")
-    return builder(spec["duration_s"], order, spec.get("target"))
+
+    hr_zone = spec.get("hr_zone")
+    target_type = _HR_ZONE_TARGET_TYPE if hr_zone is not None else spec.get("target")
+    step = builder(spec["duration_s"], order, target_type)
+    if hr_zone is not None:
+        # zoneNumber - extra-поле у ExecutableStep (model_config extra="allow"),
+        # само по себе оно не сериализуется через конструктор builder'ов выше -
+        # выставляем отдельно, см. _HR_ZONE_TARGET_TYPE.
+        step.zoneNumber = int(hr_zone)
+    return step
 
 
 def _estimate_duration_s(steps: list[dict[str, Any]]) -> int:
@@ -100,6 +126,13 @@ def build_workout(
     steps - список dict вида {"kind": "warmup"|"interval"|"recovery"|"cooldown",
     "duration_s": 300} или {"kind": "repeat", "iterations": 5, "steps": [...]}
     (вложенные шаги того же вида, без "repeat" внутри "repeat").
+
+    Опционально можно добавить "hr_zone": 1-5 к шагу (кроме repeat) - часы
+    дадут оповещение (вибро/сигнал), если пульс во время этого шага выйдет за
+    пределы указанной зоны (границы зоны в bpm берутся из личного профиля
+    пользователя в Garmin Connect, а не задаются здесь - см. _HR_ZONE_TARGET_TYPE).
+    Пример - разминка с оповещением о выходе выше Z2:
+    {"kind": "warmup", "duration_s": 1680, "hr_zone": 2}
     """
     if not WORKOUT_SUPPORT:
         raise RuntimeError(

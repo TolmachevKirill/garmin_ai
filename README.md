@@ -157,6 +157,12 @@ python -m garmin_pipeline.cli workout create --sport running --name "Лёгки�
     --steps-json '[{"kind":"warmup","duration_s":300},{"kind":"interval","duration_s":1200},{"kind":"cooldown","duration_s":300}]' `
     --date 2026-07-20
 
+# "hr_zone": 1-5 на любом шаге - часы дадут оповещение (вибро/сигнал), если пульс
+# выйдет за пределы этой зоны во время шага (границы зоны - из профиля пользователя
+# в Garmin Connect, не задаются здесь)
+python -m garmin_pipeline.cli workout create --sport running --name "Бег с оповещением Z2" `
+    --steps-json '[{"kind":"warmup","duration_s":1680,"hr_zone":2},{"kind":"interval","duration_s":1200},{"kind":"cooldown","duration_s":960,"hr_zone":2}]'
+
 # Локальный веб-интерфейс (/setup, /dashboard) - см. ниже
 python -m garmin_pipeline.cli web --port 8765
 

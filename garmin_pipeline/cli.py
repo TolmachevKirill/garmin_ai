@@ -20,6 +20,9 @@
     python -m garmin_pipeline.cli workout create --sport running --name "Лёгкий бег" \
         --steps-json '[{"kind":"warmup","duration_s":300},{"kind":"interval","duration_s":1200},{"kind":"cooldown","duration_s":300}]' \
         --date 2026-07-20
+    # "hr_zone": 1-5 на шаге - часы дадут оповещение при выходе пульса за пределы зоны
+    python -m garmin_pipeline.cli workout create --sport running --name "Бег с оповещением Z2" \
+        --steps-json '[{"kind":"warmup","duration_s":1680,"hr_zone":2},{"kind":"interval","duration_s":1200},{"kind":"cooldown","duration_s":960,"hr_zone":2}]'
     python -m garmin_pipeline.cli web --port 8765
     python -m garmin_pipeline.cli bot
 """

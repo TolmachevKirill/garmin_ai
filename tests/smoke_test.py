@@ -336,6 +336,33 @@ def test_build_workout() -> None:
     print("OK: build_workout ->", payload["estimatedDurationInSecs"], "s,", len(top_steps), "top-level steps")
 
 
+def test_build_workout_hr_zone_alert() -> None:
+    """"hr_zone": N на шаге (warmup/interval/recovery/cooldown) должен дать
+
+    targetType=heart.rate.zone + zoneNumber=N в итоговом JSON - см. пользовательский
+    запрос "оповещение при переходе Z2 на разминке/заминке". zoneNumber - именно
+    он, а не targetValueOne/Two (те поля для темпа м/с - Garmin интерпретирует
+    их так независимо от targetType, см. cyberjunky/python-garminconnect#333)."""
+    steps = [
+        {"kind": "warmup", "duration_s": 1680, "hr_zone": 2},
+        {"kind": "interval", "duration_s": 20},  # без hr_zone - обычный шаг без таргета
+        {"kind": "cooldown", "duration_s": 960, "hr_zone": 2},
+    ]
+    workout = build_workout(sport="running", name="С оповещением Z2", steps=steps)
+    payload = workout.to_dict()
+    warmup, interval, cooldown = payload["workoutSegments"][0]["workoutSteps"]
+
+    for step in (warmup, cooldown):
+        assert step["targetType"]["workoutTargetTypeKey"] == "heart.rate.zone"
+        assert step["targetType"]["workoutTargetTypeId"] == 4
+        assert step["zoneNumber"] == 2
+        assert "targetValueOne" not in step and "targetValueTwo" not in step
+
+    assert interval.get("targetType", {}).get("workoutTargetTypeKey") == "no.target"
+    assert "zoneNumber" not in interval
+    print("OK: build_workout hr_zone -> warmup/cooldown zoneNumber=2, interval без таргета")
+
+
 def test_config_json_overlay_and_reload() -> None:
     """config.json должен иметь приоритет над .env и подхватываться без
 
@@ -814,6 +841,7 @@ if __name__ == "__main__":
     test_compute_km_splits_from_synthetic_track()
     test_fit_records_to_splits()
     test_build_workout()
+    test_build_workout_hr_zone_alert()
     test_config_json_overlay_and_reload()
     test_llm_not_configured_error()
     test_bot_chunks_and_authorization()
