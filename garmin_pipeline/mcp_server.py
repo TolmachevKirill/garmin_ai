@@ -5,12 +5,17 @@
 которые не могут вызвать локальный CLI напрямую, в отличие от Cursor (там
 для этого есть .cursor/skills/garmin-health/SKILL.md).
 
-Инструменты отдают "сырые" данные, а не готовые отчёты - решение "что и как
-посчитать" оставлено вызывающей модели (см. export.py и обоснование в
-README/SKILL.md - раздел "Ad hoc аналитические запросы"). Единственное
-исключение - build_shareable_range_report, которая создаёт готовую
-markdown/HTML-страницу для публикации (для этого нужен фиксированный формат,
-не имеет смысла заставлять каждую модель заново придумывать вёрстку).
+Сама логика инструментов живёт в garmin_pipeline/actions.py (общая для
+MCP-сервера и агентного Telegram-бота, см. agent_tools.py) - здесь только
+тонкие @mcp.tool() обёртки. Инструменты read-only и отдают "сырые" данные,
+а не готовые отчёты - решение "что и как посчитать" оставлено вызывающей
+модели (см. export.py и README/SKILL.md, раздел "Ad hoc аналитические
+запросы"). Единственное исключение - build_shareable_range_report, которая
+создаёт готовую markdown/HTML-страницу для публикации (для этого нужен
+фиксированный формат, не имеет смысла заставлять каждую модель заново
+придумывать вёрстку). Write-действия (создание/удаление тренировок,
+загрузка файлов) здесь намеренно не выставлены - см. agent_tools.py/bot.py,
+где они защищены подтверждением пользователя перед выполнением.
 
 Запуск (stdio-транспорт - клиент сам поднимает процесс):
     python -m garmin_pipeline.cli mcp
@@ -24,20 +29,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from garmin_pipeline.client import get_client
-from garmin_pipeline.collectors.activity import (
-    fetch_activity_records,
-    get_exercise_sets,
-    get_hr_zones,
-    is_set_based_activity,
-    search_activities,
-)
-from garmin_pipeline.collectors.export import export_raw_range
-from garmin_pipeline.collectors.fit import compute_km_splits_with_fallback
-from garmin_pipeline.collectors.range_report import build_range_report
-from garmin_pipeline.collectors.sync import sync_recent_days
-from garmin_pipeline.formatting import render_range_report_md
-from garmin_pipeline.library import write_range_report
+from garmin_pipeline import actions
 
 mcp = FastMCP(
     "garmin-health-pipeline",
@@ -66,9 +58,7 @@ def get_daily_metrics(date_from: str, date_to: str) -> list[dict[str, Any]]:
     запросе за новый период может занять время, при повторном по тому же/
     пересекающемуся периоду отвечает мгновенно из локального кэша.
     """
-    client = get_client(interactive=False)
-    payload = export_raw_range(date_from, date_to, client=client)
-    return payload["daily"]
+    return actions.get_daily_metrics(date_from, date_to)
 
 
 @mcp.tool()
@@ -81,12 +71,7 @@ def get_activities(date_from: str, date_to: str, activity_type: str | None = Non
     avg_pace_s_per_km), elevation_gain_m, training_effect_aerobic (0-5),
     calories. activity_type - опциональный фильтр по точному типу.
     """
-    client = get_client(interactive=False)
-    payload = export_raw_range(date_from, date_to, client=client)
-    activities = payload["activities"]
-    if activity_type:
-        activities = [a for a in activities if (a.get("activity_type") or "").lower() == activity_type.lower()]
-    return activities
+    return actions.get_activities(date_from, date_to, activity_type=activity_type)
 
 
 @mcp.tool()
@@ -104,10 +89,9 @@ def find_activities(
     в горах на прошлой неделе" или "последняя тренировка") - в отличие от
     get_activities, тут можно искать по имени/типу без указания периода и
     получить activity_id для get_activity_detail. `latest=true` вернёт самую
-    последнюю тренировку без прочих фильтров."""
-    client = get_client(interactive=False)
-    return search_activities(
-        client,
+    последнюю тренировку без прочих фильтров.
+    """
+    return actions.find_activities(
         date=date,
         date_from=date_from,
         date_to=date_to,
@@ -125,19 +109,10 @@ def get_activity_detail(activity_id: str) -> dict[str, Any]:
     сплиты по км (из оригинального FIT-файла, с фолбэком на пересчёт из
     time-series), распределение по пульсовым зонам, а для силовых/кардио
     тренировок (strength_training, hiit, ...) - ещё и exercise_sets: разбивка
-    по упражнениям с числом подходов/повторов и весом (кг), если устройство
-    их распознало, в дополнение к базовым полям из get_activities."""
-    client = get_client(interactive=False)
-    candidates = search_activities(client, activity_id=activity_id, limit=1)
-    if not candidates:
-        return {"error": f"Тренировка с activity_id={activity_id} не найдена"}
-    act = candidates[0]
-    records = fetch_activity_records(client, activity_id)
-    act["splits"] = compute_km_splits_with_fallback(client, activity_id, records)
-    act["hr_zones"] = get_hr_zones(client, activity_id)
-    if is_set_based_activity(act.get("type")):
-        act["exercise_sets"] = get_exercise_sets(client, activity_id)
-    return act
+    по упражнениям с числом подходов/повторов, весом (кг) и группами мышц,
+    если устройство их распознало, в дополнение к базовым полям из get_activities.
+    """
+    return actions.get_activity_detail(activity_id)
 
 
 @mcp.tool()
@@ -146,10 +121,9 @@ def sync_cache(days: int = 3) -> str:
 
     не нужно вызывать вручную: get_daily_metrics/get_activities и так
     дособирают недостающее сами. Полезно перед серией запросов, чтобы
-    прогреть кэш заранее одним вызовом."""
-    client = get_client(interactive=False)
-    n = sync_recent_days(client, days=days)
-    return f"Синхронизировано {n} дн. в локальный кэш."
+    прогреть кэш заранее одним вызовом.
+    """
+    return actions.sync_cache(days=days)
 
 
 @mcp.tool()
@@ -160,11 +134,19 @@ def build_shareable_range_report(date_from: str, date_to: str) -> dict[str, Any]
     период - используй, только если пользователь явно просит красивый отчёт/
     файл/страницу для публикации, а не для обычных аналитических вопросов
     (для них используй get_daily_metrics/get_activities и посчитай сам).
-    Файл также открывается как HTML-страница в веб-дашборде на /range."""
-    client = get_client(interactive=False)
-    report = build_range_report(client, date_from, date_to)
-    path = write_range_report(date_from, date_to, render_range_report_md(report))
-    return {"markdown_path": str(path), **report}
+    Файл также открывается как HTML-страница в веб-дашборде на /range.
+    """
+    return actions.build_shareable_range_report(date_from, date_to)
+
+
+@mcp.tool()
+def list_workouts(limit: int = 20) -> list[dict[str, Any]]:
+    """Список структурированных тренировок в библиотеке Garmin (созданных
+
+    через агентного бота/CLI или руками в приложении/на часах) - с
+    workout_id, названием, видом спорта и датой создания.
+    """
+    return actions.list_workouts(limit=limit)
 
 
 def main() -> None:

@@ -7,13 +7,14 @@ FastAPI + Uvicorn - лёгкие, асинхронные, дружелюбны �
 
 from __future__ import annotations
 
+import threading
 from datetime import date as date_cls
 from urllib.parse import quote
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from garmin_pipeline import config
+from garmin_pipeline import config, ollama_setup
 from garmin_pipeline.cache import get_connection, upsert_activity, upsert_daily_metrics
 from garmin_pipeline.client import get_client
 from garmin_pipeline.collectors.context import build_context
@@ -33,6 +34,31 @@ from garmin_pipeline.library import (
 from garmin_pipeline.webapp import templates
 
 _KNOWN_CATEGORIES = {"daily", "weekly", "monthly", "activities", "context", "range"}
+
+# Состояние фонового скачивания модели Ollama - однопользовательский локальный
+# инструмент, так что простой module-level dict + Lock вместо полноценной
+# job-очереди вполне достаточно (см. /api/ollama/pull и /api/ollama/pull-progress).
+_ollama_pull_state: dict[str, object] = {"active": False, "model": None, "status": None, "pct": None, "error": None, "done": False}
+_ollama_pull_lock = threading.Lock()
+
+
+def _run_ollama_pull(model: str) -> None:
+    with _ollama_pull_lock:
+        _ollama_pull_state.update(active=True, model=model, status="старт...", pct=None, error=None, done=False)
+
+    def on_progress(payload: dict) -> None:
+        total, completed = payload.get("total"), payload.get("completed")
+        with _ollama_pull_lock:
+            pct = round(100 * completed / total, 1) if total and completed is not None else _ollama_pull_state.get("pct")
+            _ollama_pull_state.update(status=payload.get("status"), pct=pct)
+
+    try:
+        ollama_setup.pull_model(model, on_progress=on_progress)
+        with _ollama_pull_lock:
+            _ollama_pull_state.update(active=False, done=True, pct=100, status="готово")
+    except Exception as exc:  # noqa: BLE001 - показываем пользователю любую причину сбоя
+        with _ollama_pull_lock:
+            _ollama_pull_state.update(active=False, done=False, error=str(exc))
 
 
 def create_app() -> FastAPI:
@@ -76,6 +102,29 @@ def create_app() -> FastAPI:
             }
         )
         return RedirectResponse(url=f"/dashboard?flash={quote('Настройки сохранены')}", status_code=303)
+
+    @app.get("/api/ollama/status")
+    def ollama_status() -> JSONResponse:
+        return JSONResponse(ollama_setup.status())
+
+    @app.post("/api/ollama/install")
+    def ollama_install() -> JSONResponse:
+        ok, message = ollama_setup.install()
+        return JSONResponse({"ok": ok, "message": message})
+
+    @app.post("/api/ollama/pull")
+    def ollama_pull() -> JSONResponse:
+        with _ollama_pull_lock:
+            if _ollama_pull_state.get("active"):
+                return JSONResponse({"started": False, "message": "Скачивание уже идёт"})
+        model = ollama_setup.RECOMMENDED_MODEL
+        threading.Thread(target=_run_ollama_pull, args=(model,), daemon=True).start()
+        return JSONResponse({"started": True, "model": model})
+
+    @app.get("/api/ollama/pull-progress")
+    def ollama_pull_progress() -> JSONResponse:
+        with _ollama_pull_lock:
+            return JSONResponse(dict(_ollama_pull_state))
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:

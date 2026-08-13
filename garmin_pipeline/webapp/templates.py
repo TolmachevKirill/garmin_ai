@@ -283,6 +283,64 @@ _SCRIPT_LLM_PRESET = """
 </script>
 """
 
+_SCRIPT_OLLAMA = """
+<script>
+  async function ollamaRefreshStatus() {
+    var el = document.getElementById('ollama-status');
+    try {
+      var r = await fetch('/api/ollama/status');
+      var s = await r.json();
+      if (!s.running) {
+        el.innerHTML = '⚪ Ollama не отвечает' + (s.binary_found ? ' (бинарник найден, но сервис не запущен)' : ' — пока не установлена');
+      } else {
+        el.innerHTML = '🟢 Ollama работает · моделей скачано: ' + s.models.length +
+          (s.recommended_pulled ? ' · ' + s.recommended_model + ' готова ✅' : ' · ' + s.recommended_model + ' пока не скачана');
+      }
+    } catch (e) {
+      el.textContent = 'Не удалось проверить статус (это нормально, если Ollama не установлена).';
+    }
+  }
+  async function ollamaInstall() {
+    var el = document.getElementById('ollama-status');
+    el.textContent = 'Устанавливаю через системный пакетный менеджер (может занять пару минут)...';
+    try {
+      var r = await fetch('/api/ollama/install', {method: 'POST'});
+      var j = await r.json();
+      el.textContent = j.message;
+    } catch (e) {
+      el.textContent = 'Не получилось запустить установку.';
+    }
+    ollamaRefreshStatus();
+  }
+  async function ollamaPull() {
+    document.getElementById('ollama-progress').style.display = 'block';
+    await fetch('/api/ollama/pull', {method: 'POST'});
+    ollamaPollProgress();
+  }
+  async function ollamaPollProgress() {
+    var r = await fetch('/api/ollama/pull-progress');
+    var p = await r.json();
+    var bar = document.getElementById('ollama-progress-bar');
+    var text = document.getElementById('ollama-progress-text');
+    if (p.error) {
+      text.textContent = 'Ошибка: ' + p.error;
+      return;
+    }
+    var pctKnown = (p.pct !== null && p.pct !== undefined);
+    if (pctKnown) { bar.style.width = p.pct + '%'; }
+    text.textContent = (p.status || '') + (pctKnown ? ' · ' + p.pct + '%' : '');
+    if (p.active) {
+      setTimeout(ollamaPollProgress, 1200);
+    } else if (p.done) {
+      text.textContent = 'Готово: модель скачана ✅';
+      bar.style.width = '100%';
+      ollamaRefreshStatus();
+    }
+  }
+  ollamaRefreshStatus();
+</script>
+"""
+
 
 def _password_field(name: str, *, placeholder: str) -> str:
     """Поле пароля/ключа со кнопкой-глазом показать/скрыть значение."""
@@ -367,7 +425,7 @@ def setup_page(settings: Any, flash: str | None = None) -> str:
           <option value="https://foundation-models.api.cloud.ru/v1|deepseek-ai/DeepSeek-V3.1">Cloud.ru Evolution Foundation Models (рекомендуется в РФ)</option>
           <option value="https://api.openai.com/v1|gpt-4o-mini">OpenAI</option>
           <option value="https://api.deepseek.com/v1|deepseek-chat">DeepSeek (напрямую)</option>
-          <option value="http://localhost:11434/v1|qwen2.5">Ollama (локально, без ключа)</option>
+          <option value="http://localhost:11434/v1|qwen3:4b">Ollama (локально, без ключа)</option>
         </select>
         <div class="row">
           <div>
@@ -391,6 +449,26 @@ def setup_page(settings: Any, flash: str | None = None) -> str:
 
       <div class="card">
         <div class="card-head">
+          <div class="card-icon">🖥️</div>
+          <h2>Локальная модель (Ollama) — опционально</h2>
+        </div>
+        <div class="card-sub">Данные не покидают компьютер. Ставится один раз: сама Ollama (~700 МБ) + модель (~2.5 ГБ) — ни то, ни другое не входит в этот репозиторий.</div>
+        <div id="ollama-status" class="hint" style="margin:0 0 14px;">Проверяю статус...</div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <button type="button" class="secondary" onclick="ollamaInstall()">Установить Ollama</button>
+          <button type="button" class="secondary" onclick="ollamaPull()">Скачать qwen3:4b</button>
+        </div>
+        <div id="ollama-progress" style="display:none; margin-top:16px;">
+          <div style="background: var(--bg-soft); border-radius: 999px; height: 8px; overflow: hidden;">
+            <div id="ollama-progress-bar" style="background: var(--accent); height: 100%; width: 0%; transition: width .3s;"></div>
+          </div>
+          <div id="ollama-progress-text" class="hint" style="margin-top: 8px;"></div>
+        </div>
+        <div class="hint">После скачивания выбери пресет «Ollama (локально)» в поле LLM выше и сохрани настройки.</div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
           <div class="card-icon">📱</div>
           <h2>Telegram-бот</h2>
         </div>
@@ -407,6 +485,7 @@ def setup_page(settings: Any, flash: str | None = None) -> str:
     </form>
     {_SCRIPT_TOGGLE_PASSWORD}
     {_SCRIPT_LLM_PRESET}
+    {_SCRIPT_OLLAMA}
     """
     return _page("Настройка - Garmin Health Pipeline", body, active="setup")
 

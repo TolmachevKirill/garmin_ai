@@ -73,6 +73,8 @@ from garmin_pipeline.collectors.workouts import build_workout  # noqa: E402
 from garmin_pipeline import config as garmin_config  # noqa: E402
 from garmin_pipeline import llm_client  # noqa: E402
 from garmin_pipeline import bot as garmin_bot  # noqa: E402
+from garmin_pipeline import agent_tools  # noqa: E402
+from garmin_pipeline import ollama_setup  # noqa: E402
 import desktop_app  # noqa: E402
 from garmin_pipeline.rollup import build_monthly_rollup  # noqa: E402
 from garmin_pipeline.webapp import templates as webapp_templates  # noqa: E402
@@ -361,6 +363,46 @@ def test_build_workout_hr_zone_alert() -> None:
     assert interval.get("targetType", {}).get("workoutTargetTypeKey") == "no.target"
     assert "zoneNumber" not in interval
     print("OK: build_workout hr_zone -> warmup/cooldown zoneNumber=2, interval без таргета")
+
+
+def test_build_workout_strength_exercise_and_rest_steps() -> None:
+    """sport='strength_training' + kind='exercise'/'rest' (см. пользовательский
+
+    запрос на кор-тренировку: дэд баг/скручивания/мост/... по подходам и
+    повторам, с отдыхом между сетами и опциональным весом) - должен собираться
+    через BaseWorkout (нет typed-класса под strength в garminconnect.workout),
+    reps -> endCondition REPS(10), duration_s -> endCondition TIME(2), а
+    category/exerciseName/weightValue - через extra="allow" на ExecutableStep."""
+    steps = [
+        {"kind": "exercise", "category": "hip_stability", "exercise_name": "dead_bug", "reps": 20},
+        {"kind": "rest", "duration_s": 30},
+        {"kind": "exercise", "category": "banded_exercises", "exercise_name": "glute_bridge",
+         "reps": 20, "weight_kg": 10},
+        {"kind": "exercise", "category": "plank", "exercise_name": "side_plank", "duration_s": 20},
+    ]
+    workout = build_workout(sport="strength_training", name="Кор и ягодицы", steps=steps)
+    payload = workout.to_dict()
+    assert payload["sportType"]["sportTypeKey"] == "strength_training"
+
+    dead_bug, rest, glute_bridge, side_plank = payload["workoutSegments"][0]["workoutSteps"]
+
+    assert dead_bug["endCondition"]["conditionTypeKey"] == "reps"
+    assert dead_bug["endConditionValue"] == 20.0
+    assert dead_bug["category"] == "HIP_STABILITY"
+    assert dead_bug["exerciseName"] == "DEAD_BUG"
+    assert "weightValue" not in dead_bug
+
+    assert rest["stepType"]["stepTypeKey"] == "rest"
+    assert rest["endCondition"]["conditionTypeKey"] == "time"
+    assert rest["endConditionValue"] == 30.0
+
+    assert glute_bridge["weightValue"] == 10.0
+    assert glute_bridge["weightUnit"]["unitKey"] == "kilogram"
+
+    assert side_plank["endCondition"]["conditionTypeKey"] == "time"
+    assert side_plank["endConditionValue"] == 20.0
+    assert side_plank["exerciseName"] == "SIDE_PLANK"
+    print("OK: build_workout strength_training -> exercise (reps/duration_s/weight_kg) + rest steps")
 
 
 def test_config_json_overlay_and_reload() -> None:
@@ -829,6 +871,142 @@ def test_mcp_server_tools_registered() -> None:
     print("OK: MCP-сервер регистрирует инструменты ->", sorted(tool_names))
 
 
+def test_agent_tools_schema_and_dispatch() -> None:
+    """agent_tools.py - схема + диспетчер для агентного Telegram-бота (bot.py):
+
+    каждый инструмент из TOOLS_SCHEMA должен иметь реальную функцию в
+    TOOL_FUNCTIONS, WRITE_TOOL_NAMES - подмножество (именно они требуют
+    подтверждения перед выполнением, см. describe_call/run_agentic)."""
+    names = {t["function"]["name"] for t in agent_tools.TOOLS_SCHEMA}
+    assert names == set(agent_tools.TOOL_FUNCTIONS.keys()), "TOOLS_SCHEMA и TOOL_FUNCTIONS расходятся"
+    assert agent_tools.WRITE_TOOL_NAMES.issubset(names)
+    assert agent_tools.WRITE_TOOL_NAMES == {"create_workout", "delete_workout", "upload_activity_file"}
+    for tool in agent_tools.TOOLS_SCHEMA:
+        fn = tool["function"]
+        assert fn["parameters"]["type"] == "object"
+        assert "description" in fn and len(fn["description"]) > 10
+
+    preview = agent_tools.describe_call(
+        "create_workout",
+        {"sport": "running", "name": "Лёгкий бег", "steps_json": '[{"kind":"warmup","duration_s":300}]'},
+    )
+    assert "Лёгкий бег" in preview and "бег" in preview
+
+    preview_del = agent_tools.describe_call("delete_workout", {"workout_id": "999"})
+    assert "999" in preview_del and "необратимо" in preview_del.lower()
+
+    err = agent_tools.execute_tool("no_such_tool", {})
+    assert "error" in err
+
+    assert agent_tools.stringify_tool_result({"a": 1}) == '{"a": 1}'
+    assert agent_tools.stringify_tool_result("plain text") == "plain text"
+    print("OK: agent_tools schema/dispatch/describe_call ->", sorted(names))
+
+
+def test_run_agentic_stops_on_write_tool_and_resumes() -> None:
+    """Ядро агентного цикла (llm_client.run_agentic/resume_after_confirmation),
+
+    проверенное через injectable chat_fn (без реального обращения к LLM/сети):
+    read-инструмент выполняется автоматически и цикл продолжается, а на
+    write-инструменте цикл останавливается и требует подтверждения - именно
+    это отделяет "агент читает сам" от "агент делает что-то без спроса"
+    (см. пользовательский запрос про human-in-the-loop в Telegram-боте)."""
+    import json as _json
+
+    tools = [
+        {"type": "function", "function": {"name": "get_daily_metrics", "parameters": {}}},
+        {"type": "function", "function": {"name": "delete_workout", "parameters": {}}},
+    ]
+    write_tools = {"delete_workout"}
+
+    def fake_chat_fn(messages: list[dict], _tools: list[dict]) -> dict:
+        n_tool_msgs = sum(1 for m in messages if m.get("role") == "tool")
+        if n_tool_msgs == 0:
+            return {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "call_1", "type": "function",
+                                 "function": {"name": "get_daily_metrics", "arguments": "{}"}}],
+            }
+        if n_tool_msgs == 1:
+            return {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "call_2", "type": "function",
+                                 "function": {"name": "delete_workout",
+                                              "arguments": _json.dumps({"workout_id": "42"})}}],
+            }
+        return {"role": "assistant", "content": "Готово, тренировка удалена.", "tool_calls": None}
+
+    def fake_execute_tool(name: str, args: dict) -> dict:
+        if name == "get_daily_metrics":
+            return {"steps": 1000}
+        if name == "delete_workout":
+            return {"deleted": True, "workout_id": args.get("workout_id")}
+        raise AssertionError(f"unexpected tool {name}")
+
+    history = [{"role": "system", "content": "sys"}, {"role": "user", "content": "удали тренировку 42"}]
+
+    reply = llm_client.run_agentic(
+        history, tools=tools, write_tool_names=write_tools, execute_tool=fake_execute_tool,
+        stringify=_json.dumps, chat_fn=fake_chat_fn,
+    )
+    assert reply.kind == "confirm"
+    assert reply.pending.name == "delete_workout"
+    assert reply.pending.arguments == {"workout_id": "42"}
+
+    final = llm_client.resume_after_confirmation(
+        reply.pending, confirmed=True, tools=tools, write_tool_names=write_tools,
+        execute_tool=fake_execute_tool, stringify=_json.dumps, chat_fn=fake_chat_fn,
+    )
+    assert final.kind == "final" and "удалена" in final.text
+
+    reply2 = llm_client.run_agentic(
+        history, tools=tools, write_tool_names=write_tools, execute_tool=fake_execute_tool,
+        stringify=_json.dumps, chat_fn=fake_chat_fn,
+    )
+    cancelled = llm_client.resume_after_confirmation(
+        reply2.pending, confirmed=False, tools=tools, write_tool_names=write_tools,
+        execute_tool=fake_execute_tool, stringify=_json.dumps, chat_fn=fake_chat_fn,
+    )
+    tool_msgs = [m for m in cancelled.messages if m.get("role") == "tool"]
+    assert any("отклонил" in m["content"] for m in tool_msgs), "Отказ должен попасть в tool-ответ, а не выполниться"
+    print("OK: run_agentic останавливается на write-инструменте + resume_after_confirmation (confirm/cancel)")
+
+
+def test_bot_trim_history_keeps_tool_pairs_intact() -> None:
+    """_trim_history (bot.py) должна резать историю только по границе
+
+    user-сообщения - иначе можно оторвать tool-ответ от вызвавшего его
+    assistant tool_call и сломать следующий запрос к OpenAI-совместимому API."""
+    system = {"role": "system", "content": "sys"}
+    messages = [system]
+    for i in range(10):
+        messages.append({"role": "user", "content": f"q{i}"})
+        messages.append({"role": "assistant", "content": None, "tool_calls": [{"id": f"c{i}"}]})
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": "r"})
+        messages.append({"role": "assistant", "content": f"a{i}"})
+
+    trimmed = garmin_bot._trim_history(messages, keep=6)
+    assert trimmed[0] == system
+    assert trimmed[1]["role"] == "user", "Обрезка должна начинаться с user-сообщения, а не середины tool-пары"
+    # Ни один tool-ответ не должен остаться без предшествующего assistant tool_call в этом же срезе
+    for i, m in enumerate(trimmed):
+        if m.get("role") == "tool":
+            assert i > 0 and trimmed[i - 1]["role"] == "assistant"
+    print("OK: bot._trim_history режет только по границе user-сообщения ->", len(trimmed), "сообщений")
+
+
+def test_ollama_setup_status_does_not_crash_without_server() -> None:
+    """ollama_setup.status()/list_models() не должны падать исключением, даже
+
+    если Ollama не установлена/не запущена на машине - только это гарантирует
+    безопасный вызов из /setup веб-формы у любого пользователя."""
+    st = ollama_setup.status()
+    assert set(st.keys()) == {"binary_found", "running", "models", "recommended_model", "recommended_pulled", "download_url"}
+    assert st["recommended_model"] == "qwen3:4b"
+    assert isinstance(st["models"], list)
+    print("OK: ollama_setup.status() безопасен без установленной Ollama ->", st)
+
+
 def test_index() -> None:
     path = update_index()
     assert path.exists()
@@ -842,6 +1020,7 @@ if __name__ == "__main__":
     test_fit_records_to_splits()
     test_build_workout()
     test_build_workout_hr_zone_alert()
+    test_build_workout_strength_exercise_and_rest_steps()
     test_config_json_overlay_and_reload()
     test_llm_not_configured_error()
     test_bot_chunks_and_authorization()
@@ -865,5 +1044,9 @@ if __name__ == "__main__":
     test_raw_payload_roundtrip()
     test_analyze_surface()
     test_monthly_rollup()
+    test_agent_tools_schema_and_dispatch()
+    test_run_agentic_stops_on_write_tool_and_resumes()
+    test_bot_trim_history_keeps_tool_pairs_intact()
+    test_ollama_setup_status_does_not_crash_without_server()
     test_index()
     print("\nALL SMOKE TESTS PASSED")

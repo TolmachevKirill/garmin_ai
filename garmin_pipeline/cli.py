@@ -23,6 +23,10 @@
     # "hr_zone": 1-5 на шаге - часы дадут оповещение при выходе пульса за пределы зоны
     python -m garmin_pipeline.cli workout create --sport running --name "Бег с оповещением Z2" \
         --steps-json '[{"kind":"warmup","duration_s":1680,"hr_zone":2},{"kind":"interval","duration_s":1200},{"kind":"cooldown","duration_s":960,"hr_zone":2}]'
+    # Силовая/кор-тренировка: "exercise" (reps ИЛИ duration_s, category+exercise_name
+    # из справочника Garmin, опционально weight_kg) + "rest" между подходами
+    python -m garmin_pipeline.cli workout create --sport strength_training --name "Кор" \
+        --steps-json '[{"kind":"repeat","iterations":2,"steps":[{"kind":"exercise","category":"HIP_STABILITY","exercise_name":"DEAD_BUG","reps":20},{"kind":"rest","duration_s":30}]}]'
     python -m garmin_pipeline.cli web --port 8765
     python -m garmin_pipeline.cli bot
 """
@@ -272,6 +276,42 @@ def cmd_workout_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ollama_status(_args: argparse.Namespace) -> int:
+    from garmin_pipeline import ollama_setup
+
+    st = ollama_setup.status()
+    print(f"Бинарник ollama в PATH: {'да' if st['binary_found'] else 'нет'}")
+    print(f"Сервис отвечает (localhost:11434): {'да' if st['running'] else 'нет'}")
+    if st["running"]:
+        print(f"Локальные модели: {', '.join(st['models']) or '(пусто)'}")
+        print(
+            f"Рекомендованная модель {st['recommended_model']}: "
+            f"{'скачана' if st['recommended_pulled'] else 'не скачана'}"
+        )
+    else:
+        print(f"Установить: `python -m garmin_pipeline.cli ollama install` или {st['download_url']}")
+    return 0
+
+
+def cmd_ollama_install(_args: argparse.Namespace) -> int:
+    from garmin_pipeline import ollama_setup
+
+    ok, message = ollama_setup.install()
+    print(message)
+    return 0 if ok else 1
+
+
+def cmd_ollama_pull(args: argparse.Namespace) -> int:
+    from garmin_pipeline import ollama_setup
+
+    try:
+        ollama_setup.pull_model_cli(args.model or ollama_setup.RECOMMENDED_MODEL)
+    except RuntimeError as err:
+        print(f"Ошибка: {err}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_bot(_args: argparse.Namespace) -> int:
     from garmin_pipeline.bot import run_bot
 
@@ -372,7 +412,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workout_sub = p_workout.add_subparsers(dest="workout_command", required=True)
     p_workout_create = workout_sub.add_parser("create", help="Создать тренировку из JSON-описания шагов")
-    p_workout_create.add_argument("--sport", required=True, choices=["running", "cycling"])
+    p_workout_create.add_argument(
+        "--sport",
+        required=True,
+        choices=["running", "cycling", "strength_training", "cardio_training", "hiit"],
+    )
     p_workout_create.add_argument("--name", required=True, help="Название тренировки")
     p_workout_create.add_argument(
         "--steps-json", help='JSON-список шагов, напр. \'[{"kind":"warmup","duration_s":300}, ...]\''
@@ -400,6 +444,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_coverage = cache_sub.add_parser("coverage", help="Пропуски по дням за период")
     p_coverage.add_argument("--days", type=int, default=30, help="Сколько последних дней проверить")
     p_coverage.set_defaults(func=cmd_cache_coverage)
+
+    p_ollama = sub.add_parser(
+        "ollama", help="Локальная LLM для агентного Telegram-бота (сама Ollama не часть репозитория)"
+    )
+    ollama_sub = p_ollama.add_subparsers(dest="ollama_command", required=True)
+    ollama_sub.add_parser("status", help="Установлена/запущена ли Ollama, какие модели скачаны").set_defaults(
+        func=cmd_ollama_status
+    )
+    ollama_sub.add_parser(
+        "install", help="Best-effort автоустановка через winget/brew/install.sh"
+    ).set_defaults(func=cmd_ollama_install)
+    p_ollama_pull = ollama_sub.add_parser("pull", help="Скачать модель (по умолчанию - рекомендованная qwen3:4b)")
+    p_ollama_pull.add_argument("--model", default=None, help="Имя модели (по умолчанию qwen3:4b)")
+    p_ollama_pull.set_defaults(func=cmd_ollama_pull)
 
     return parser
 

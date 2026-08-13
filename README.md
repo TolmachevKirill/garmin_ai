@@ -32,9 +32,13 @@ garmin_pipeline/
 ├── formatting.py          markdown-шаблоны (daily/weekly/context/activity)
 ├── library.py             запись файлов + _index.md + чтение для веб-дашборда
 ├── rollup.py              месячный rollup из кэша
-├── llm_client.py          BYOK/BYOM обёртка над OpenAI-совместимым API
-├── bot.py                 Telegram-бот (polling)
-├── webapp/                FastAPI: /setup, /dashboard, /view
+├── llm_client.py          BYOK/BYOM обёртка над OpenAI-совместимым API + агентный tool-calling цикл
+├── actions.py             общие read/write-действия над Garmin (для MCP-сервера и агентного бота)
+├── agent_tools.py         OpenAI tools-схема + диспетчер поверх actions.py (для bot.py)
+├── ollama_setup.py        статус/установка/скачивание локальной модели (Ollama)
+├── bot.py                 Telegram-бот (polling, агентный tool-calling + human-in-the-loop подтверждения)
+├── mcp_server.py          MCP-сервер (read-only обёртки над actions.py) для внешних LLM-клиентов
+├── webapp/                FastAPI: /setup, /dashboard, /view, /api/ollama/*
 ├── collectors/
 │   ├── daily.py            биометрия + тренировки за день
 │   ├── weekly.py            агрегация недели + сравнение с прошлой
@@ -163,6 +167,14 @@ python -m garmin_pipeline.cli workout create --sport running --name "Лёгки�
 python -m garmin_pipeline.cli workout create --sport running --name "Бег с оповещением Z2" `
     --steps-json '[{"kind":"warmup","duration_s":1680,"hr_zone":2},{"kind":"interval","duration_s":1200},{"kind":"cooldown","duration_s":960,"hr_zone":2}]'
 
+# Силовая/кор-тренировка (sport strength_training/cardio_training/hiit): шаги "exercise"
+# (reps ИЛИ duration_s, category+exercise_name из справочника Garmin, опционально
+# weight_kg) и "rest" между подходами. Если weight_kg не указан - вес свободный
+# (подбирается на месте), но фактически использованный всё равно попадёт в
+# завершённую активность и будет виден в exercise_sets (см. activity export).
+python -m garmin_pipeline.cli workout create --sport strength_training --name "Кор и ягодицы" `
+    --steps-json '[{"kind":"exercise","category":"HIP_STABILITY","exercise_name":"DEAD_BUG","reps":20},{"kind":"rest","duration_s":30},{"kind":"exercise","category":"HIP_STABILITY","exercise_name":"DEAD_BUG","reps":20}]'
+
 # Локальный веб-интерфейс (/setup, /dashboard) - см. ниже
 python -m garmin_pipeline.cli web --port 8765
 
@@ -209,10 +221,15 @@ MCP-сервер (`garmin_pipeline/mcp_server.py`) - те же данные, н�
 [Model Context Protocol](https://modelcontextprotocol.io/), чтобы ими мог
 пользоваться любой MCP-совместимый клиент (Claude Desktop и т.п.), не только
 Cursor. Инструменты отдают "сырые" данные (`get_daily_metrics`,
-`get_activities`, `find_activities`, `get_activity_detail`, `sync_cache`) -
-считать ответ на конкретный вопрос ("сколько я пробежал в мае") должна сама
-модель, а не сервер; единственное исключение - `build_shareable_range_report`
-для готового файла/страницы публикации.
+`get_activities`, `find_activities`, `get_activity_detail`, `sync_cache`,
+`list_workouts`) - считать ответ на конкретный вопрос ("сколько я пробежал в
+мае") должна сама модель, а не сервер; единственное исключение -
+`build_shareable_range_report` для готового файла/страницы публикации.
+Логика всех инструментов живёт в `garmin_pipeline/actions.py` - тот же модуль
+использует и агентный Telegram-бот (см. ниже), только с дополнительными
+write-действиями (`create_workout`/`delete_workout`/`upload_activity_file`),
+которых в MCP-сервере намеренно нет: там их защищает подтверждение
+пользователя в чате бота, а не абстрактный внешний MCP-клиент.
 
 Сервер работает через stdio - клиент сам поднимает процесс, отдельно
 запускать `cli mcp` руками не нужно. Регистрация:
@@ -233,7 +250,7 @@ Cursor. Инструменты отдают "сырые" данные (`get_dail
 
 **Cursor** (`.cursor/mcp.json` в корне проекта или в `~/.cursor/mcp.json` глобально) -
 такой же формат, только ключ `mcpServers` внутри файла `mcp.json`. После
-сохранения конфига перезапусти клиент - он должен показать 6 доступных
+сохранения конфига перезапусти клиент - он должен показать 7 доступных
 инструментов сервера `garmin-health-pipeline`.
 
 ## Как выгружать конкретную тренировку "по запросу в чате"
@@ -297,9 +314,54 @@ Telegram-бота.
   любому, кто напишет — для личного использования крайне рекомендуется
   задать.
 
-Команды бота: `/start`, `/today`, `/week`, `/activity <запрос>`, а также
-обычный текст — он идёт в `llm_client.ask(...)` вместе с последним
-`context.md`, чтобы модель отвечала с учётом твоих метрик.
+### Агентный бот: не только аналитика, но и действия
+
+Детерминированные команды бота: `/start`, `/today`, `/week`,
+`/activity <запрос>`, `/reset` (сбросить контекст диалога). А вот обычный
+текст (и присланные файлы `.fit`/`.tcx`/`.gpx`) идёт не в разовый
+вопрос-ответ, а в полноценный **агентный tool-calling цикл**
+(`llm_client.run_agentic`, инструменты — `garmin_pipeline/actions.py` +
+`agent_tools.py`): модель сама решает, какие данные запросить у Garmin
+(за какой период, какая именно тренировка), и может сама читать несколько
+раз подряд, прежде чем ответить — а не отвечает только по заранее
+собранному 14-дневному срезу.
+
+Помимо чтения, доступны действия, которые меняют состояние в Garmin:
+создать/удалить структурированную тренировку, загрузить присланный файл
+активности. Это ровно те же примитивы, что использовались при создании
+тренировок в этом чате (см. `collectors/workouts.py`) — доступны любому
+пользователю дистрибутива, а не только через Cursor. Такие действия
+**помечены как "изменяющие данные" и требуют подтверждения** — бот
+присылает кнопки «✅ Подтвердить» / «❌ Отменить» и не выполняет их
+самостоятельно (human-in-the-loop, а не «бот тихо что-то поменял»).
+
+## Локальная модель (Ollama) — быстрый старт без танцев с бубнами
+
+Ollama и веса модели **не входят** в этот репозиторий (это ~700 МБ рантайма
++ ~2.5 ГБ весов) — но подтянуть их до состояния «работает» можно почти в
+один клик:
+
+- **Веб-форма `/setup`** → карточка «Локальная модель (Ollama)»: кнопка
+  «Установить Ollama» (best-effort автоустановка через `winget`/`brew`/
+  официальный `install.sh`, если её ещё нет) и кнопка «Скачать qwen3:4b» —
+  с прогресс-баром скачивания прямо в браузере.
+- Или через CLI:
+  ```powershell
+  python -m garmin_pipeline.cli ollama status   # что уже установлено/скачано
+  python -m garmin_pipeline.cli ollama install   # best-effort автоустановка
+  python -m garmin_pipeline.cli ollama pull       # скачать рекомендованную модель (qwen3:4b)
+  ```
+
+После этого выбери пресет «Ollama (локально)» в поле LLM на `/setup` и
+сохрани — бот/веб начнут отвечать через локальную модель без ключа и без
+данных, уходящих в облако.
+
+**Почему qwen3:4b по умолчанию** — компромисс, рассчитанный на железо
+обычного пользователя, а не разработчика: тянет CPU-only ноутбук (~2.5 ГБ
+на диске), при этом заметно надёжнее в function-calling (вызове
+инструментов из agent_tools.py), чем сравнимые по размеру модели —
+это критично именно для агентного режима бота, где модель должна не
+просто болтать, а корректно решать, какой инструмент вызвать.
 
 ## Локальный веб-интерфейс
 
