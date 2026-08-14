@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Регистрирует задачу Windows Task Scheduler, которая раз в неделю запускает
     `python -m garmin_pipeline.cli weekly` и пишет отчёт в data/library/weekly.
