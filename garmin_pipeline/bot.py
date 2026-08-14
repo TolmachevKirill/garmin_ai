@@ -25,6 +25,7 @@ from datetime import date as date_cls
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -75,9 +76,36 @@ def _chunks(text: str, size: int = MAX_MESSAGE_LEN) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)]
 
 
+_RETRY_DELAYS_S = (1, 3, 7)  # секунды между повторами при сетевом сбое
+
+
+async def _safe_reply(reply_target, text: str, **kwargs) -> None:
+    """reply_text с ретраями на временные сетевые сбои соединения с Telegram.
+
+    Без этого уже сгенерированный ответ модели можно молча потерять: LLM
+    отработал (см. лог `chat/completions 200 OK`), а последующий `reply_text`
+    падает с `httpcore.ConnectTimeout`/`NetworkError` (нестабильная сеть до
+    api.telegram.org) - исключение никто не ловит, пользователь навсегда
+    остаётся с "Думаю..." без ответа. Обнаружено при живом тестировании
+    агентного бота с локальной qwen3:4b."""
+    last_exc: Exception | None = None
+    for delay in (*_RETRY_DELAYS_S, None):
+        try:
+            await reply_target.reply_text(text, **kwargs)
+            return
+        except (NetworkError, TimedOut) as exc:
+            last_exc = exc
+            if delay is None:
+                break
+            logger.warning("Сеть недоступна при отправке в Telegram, повтор через %sс: %s", delay, exc)
+            await asyncio.sleep(delay)
+    logger.error("Не удалось доставить сообщение в Telegram после %d попыток: %s", len(_RETRY_DELAYS_S) + 1, last_exc)
+    raise last_exc
+
+
 async def _reply_long(update: Update, text: str) -> None:
     for chunk in _chunks(text):
-        await update.message.reply_text(chunk)
+        await _safe_reply(update.message, chunk)
 
 
 async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -183,7 +211,7 @@ async def _deliver_agentic_reply(reply_target, chat_id: int, reply: llm_client.A
     if reply.kind == "final":
         _CONVERSATIONS[chat_id] = _trim_history(reply.messages)
         for chunk in _chunks(reply.text or "(пустой ответ)"):
-            await reply_target.reply_text(chunk)
+            await _safe_reply(reply_target, chunk)
         return
 
     # kind == "confirm" - середина tool-calling цикла, историю не обрезаем.
@@ -195,7 +223,7 @@ async def _deliver_agentic_reply(reply_target, chat_id: int, reply: llm_client.A
         [[InlineKeyboardButton("✅ Подтвердить", callback_data="confirm"),
           InlineKeyboardButton("❌ Отменить", callback_data="cancel")]]
     )
-    await reply_target.reply_text(f"⚠️ {preview}", reply_markup=keyboard)
+    await _safe_reply(reply_target, f"⚠️ {preview}", reply_markup=keyboard)
 
 
 async def handle_free_text(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -216,7 +244,7 @@ async def handle_free_text(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> N
     try:
         reply = await _run_agentic(history)
     except Exception as exc:  # noqa: BLE001 - хотим показать пользователю любую ошибку LLM как есть
-        await update.message.reply_text(f"Ошибка при обращении к LLM: {exc}")
+        await _safe_reply(update.message, f"Ошибка при обращении к LLM: {exc}")
         return
     await _deliver_agentic_reply(update.message, chat_id, reply)
 
@@ -256,7 +284,7 @@ async def handle_document(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> No
     try:
         reply = await _run_agentic(history)
     except Exception as exc:  # noqa: BLE001
-        await update.message.reply_text(f"Ошибка при обращении к LLM: {exc}")
+        await _safe_reply(update.message, f"Ошибка при обращении к LLM: {exc}")
         return
     await _deliver_agentic_reply(update.message, chat_id, reply)
 
@@ -285,7 +313,7 @@ async def handle_callback(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> No
             stringify=agent_tools.stringify_tool_result,
         )
     except Exception as exc:  # noqa: BLE001
-        await query.message.reply_text(f"Ошибка: {exc}")
+        await _safe_reply(query.message, f"Ошибка: {exc}")
         return
     await _deliver_agentic_reply(query.message, chat_id, reply)
 
