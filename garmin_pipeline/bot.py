@@ -162,7 +162,7 @@ def _trim_history(messages: list[dict], keep: int = _MAX_HISTORY_MESSAGES) -> li
 
 
 def _new_history() -> list[dict]:
-    return [{"role": "system", "content": llm_client.AGENTIC_SYSTEM_PROMPT}]
+    return [{"role": "system", "content": llm_client.build_agentic_system_prompt()}]
 
 
 async def _run_agentic(history: list[dict]) -> llm_client.AgenticReply:
