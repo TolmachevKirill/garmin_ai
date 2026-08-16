@@ -18,6 +18,9 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Runtime logs (bot/web, launched manually or via Task Scheduler)
+*.log
+
 # PyInstaller build output
 build/
 dist/

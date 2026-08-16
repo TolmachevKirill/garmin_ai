@@ -13,9 +13,12 @@ WRITE_TOOL_NAMES - подмножество инструментов, котор
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from garmin_pipeline import actions
+
+logger = logging.getLogger(__name__)
 
 TOOL_FUNCTIONS: dict[str, Any] = {
     "get_daily_metrics": actions.get_daily_metrics,
@@ -161,7 +164,13 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
                 "[ИЗМЕНЯЕТ ДАННЫЕ, требует подтверждения пользователя] Создать структурированную "
                 "тренировку в Garmin и, если указана дата, запланировать её. "
                 "sport=running/cycling: шаги {kind: warmup|interval|recovery|cooldown, duration_s, "
-                "hr_zone?: 1-5} и {kind: repeat, repeat: N, steps: [...]}. "
+                "hr_zone?: 1-5}. Для простой непрерывной тренировки (напр. 'лёгкая пробежка 30 минут') - "
+                "ОДИН шаг interval на всю длительность (плюс warmup/cooldown), БЕЗ repeat. "
+                "{kind: repeat, iterations: N, steps: [...]} (поле - iterations, не repeat) - "
+                "только для настоящих интервалов с повторами, напр. '6x1мин быстро/2мин трусцой' -> "
+                "repeat iterations=6 со steps=[interval быстро, recovery трусцой]. Никогда не оборачивай "
+                "в repeat один длинный непрерывный отрезок - N в iterations умножает его длительность, "
+                "получится в N раз длиннее, чем просил пользователь. "
                 "sport=strength_training/cardio_training/hiit: шаги {kind: exercise, category, "
                 "exercise_name, reps|duration_s, weight_kg?} и {kind: rest, duration_s}."
             ),
@@ -225,6 +234,7 @@ def execute_tool(name: str, arguments: dict[str, Any]) -> Any:
     try:
         return fn(**arguments)
     except Exception as exc:  # noqa: BLE001 - любая ошибка инструмента должна дойти до модели как текст
+        logger.exception("Инструмент %s упал с аргументами %s", name, arguments)
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 

@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import date as date_cls
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import NetworkError, TimedOut
+from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -78,20 +79,51 @@ def _chunks(text: str, size: int = MAX_MESSAGE_LEN) -> list[str]:
 
 _RETRY_DELAYS_S = (1, 3, 7)  # секунды между повторами при сетевом сбое
 
+_HEADER_RE = re.compile(r"^#{1,6}\s*(.+)$", flags=re.MULTILINE)
+
+
+def _to_telegram_markdown(text: str) -> str:
+    """Готовит обычный GPT-markdown (**bold**, ### заголовки) под Telegram
+
+    Markdown (legacy) - тот понимает только одиночные *bold*/_italic_ и не
+    понимает заголовки вообще. Без конвертации звёздочки и решётки в ответе
+    модели показываются пользователю буквально, как есть."""
+    text = _HEADER_RE.sub(lambda m: f"*{m.group(1).strip()}*", text)
+    return text.replace("**", "*")
+
+
+def _strip_markdown(text: str) -> str:
+    """Фолбэк, когда Telegram всё равно не принял разметку (BadRequest) -
+
+    например из-за непарного '_' или '*' где-то в тексте модели. Лучше
+    показать пользователю читаемый текст без выделения, чем совсем ничего."""
+    text = _HEADER_RE.sub(lambda m: m.group(1).strip(), text)
+    return text.replace("**", "").replace("*", "").replace("_", "")
+
 
 async def _safe_reply(reply_target, text: str, **kwargs) -> None:
-    """reply_text с ретраями на временные сетевые сбои соединения с Telegram.
+    """reply_text с ретраями на временные сетевые сбои соединения с Telegram
 
-    Без этого уже сгенерированный ответ модели можно молча потерять: LLM
-    отработал (см. лог `chat/completions 200 OK`), а последующий `reply_text`
-    падает с `httpcore.ConnectTimeout`/`NetworkError` (нестабильная сеть до
-    api.telegram.org) - исключение никто не ловит, пользователь навсегда
-    остаётся с "Думаю..." без ответа. Обнаружено при живом тестировании
-    агентного бота с локальной qwen3:4b."""
+    и с безопасным откатом по форматированию: сначала пробуем отправить как
+    Telegram Markdown (после конвертации из обычного markdown модели), а если
+    Telegram отвечает BadRequest из-за непарных сущностей разметки - шлём
+    тот же текст обычным сообщением без parse_mode, лучше без жирного, чем
+    без ответа вообще.
+
+    Ретраи на сеть нужны отдельно: без них уже сгенерированный ответ модели
+    можно молча потерять - LLM отработал (см. лог `chat/completions 200 OK`),
+    а последующий `reply_text` падает с `httpcore.ConnectTimeout`/`NetworkError`
+    (нестабильная сеть до api.telegram.org) - исключение никто не ловит,
+    пользователь навсегда остаётся с "Думаю..." без ответа. Обнаружено при
+    живом тестировании агентного бота с локальной qwen3:4b."""
     last_exc: Exception | None = None
     for delay in (*_RETRY_DELAYS_S, None):
         try:
-            await reply_target.reply_text(text, **kwargs)
+            try:
+                await reply_target.reply_text(_to_telegram_markdown(text), parse_mode="Markdown", **kwargs)
+            except BadRequest as exc:
+                logger.warning("Telegram не принял Markdown-разметку ответа, шлю как обычный текст: %s", exc)
+                await reply_target.reply_text(_strip_markdown(text), **kwargs)
             return
         except (NetworkError, TimedOut) as exc:
             last_exc = exc

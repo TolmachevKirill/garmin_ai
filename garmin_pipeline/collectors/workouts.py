@@ -185,7 +185,12 @@ def _build_step(spec: dict[str, Any], counter: _StepOrderCounter) -> "Executable
     order = counter.next()
     if kind == "repeat":
         nested = [_build_step(s, counter) for s in spec["steps"]]
-        return create_repeat_group(spec["iterations"], nested, order)
+        # "repeat" - частый алиас, которым модели (особенно локальные) иногда
+        # называют то же поле вместо документированного "iterations".
+        iterations = spec.get("iterations", spec.get("repeat"))
+        if iterations is None:
+            raise ValueError("У шага repeat должно быть указано 'iterations' (число повторов)")
+        return create_repeat_group(iterations, nested, order)
     if kind == "rest":
         return _build_rest_step(spec["duration_s"], order)
     if kind == "exercise":
@@ -213,7 +218,7 @@ def _estimate_duration_s(steps: list[dict[str, Any]]) -> int:
     total = 0.0
     for s in steps:
         if s.get("kind") == "repeat":
-            total += s["iterations"] * _estimate_duration_s(s["steps"])
+            total += s.get("iterations", s.get("repeat", 1)) * _estimate_duration_s(s["steps"])
         elif s.get("duration_s") is not None:
             total += s["duration_s"]
         elif s.get("kind") == "exercise" and s.get("reps") is not None:
