@@ -161,6 +161,38 @@ def activity_label_ru(activity_type: str | None) -> str:
     return activity_type.replace("_", " ").capitalize()
 
 
+_ACTIVITY_LABELS_EN: dict[str, str] = {
+    "running": "Running", "trail_running": "Trail running", "treadmill_running": "Treadmill running",
+    "track_running": "Track running",
+    "walking": "Walking", "casual_walking": "Walking", "speed_walking": "Speed walking", "hiking": "Hiking",
+    "cycling": "Cycling", "road_biking": "Road cycling", "gravel_cycling": "Gravel cycling",
+    "indoor_cycling": "Indoor cycling", "virtual_ride": "Virtual ride", "mountain_biking": "Mountain biking",
+    "swimming": "Swimming", "lap_swimming": "Pool swimming", "open_water_swimming": "Open water swimming",
+    "strength_training": "Strength training", "cardio_training": "Cardio", "indoor_cardio": "Cardio",
+    "hiit": "HIIT", "elliptical": "Elliptical",
+    "rowing": "Rowing", "yoga": "Yoga", "meditation": "Meditation", "breathwork": "Breathwork",
+    "pilates": "Pilates", "jump_rope": "Jump rope", "other": "Other",
+    "badminton": "Badminton", "tennis": "Tennis", "table_tennis": "Table tennis",
+    "volleyball": "Volleyball", "basketball": "Basketball", "soccer": "Soccer", "golf": "Golf", "boxing": "Boxing",
+}
+
+
+def activity_label(activity_type: str | None, lang: str = "ru") -> str:
+    """Локализованное название типа активности - используется веб-UI
+
+    (см. webapp/templates.py:range_report_page), который умеет и en, в
+    отличие от markdown-отчётов (activity_label_ru), которые остаются
+    русскоязычными по дизайну проекта."""
+    if lang != "en":
+        return activity_label_ru(activity_type)
+    if not activity_type:
+        return "Other"
+    known = _ACTIVITY_LABELS_EN.get(activity_type.lower())
+    if known:
+        return known
+    return activity_type.replace("_", " ").capitalize()
+
+
 def fmt_delta(current: float | None, previous: float | None, unit: str = "", digits: int = 0) -> str:
     """Компактная запись 'было -> стало (дельта)' для трендов в weekly."""
     if current is None or previous is None:

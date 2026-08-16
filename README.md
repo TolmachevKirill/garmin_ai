@@ -1,5 +1,7 @@
 # Garmin Health Pipeline
 
+*[Read in English](README.en.md)*
+
 Забирает данные из Garmin Connect, кэширует их локально и превращает в:
 
 1. **файловую "библиотеку"** (markdown + CSV) для ручной заливки в ChatGPT

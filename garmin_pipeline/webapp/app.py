@@ -14,6 +14,26 @@ from urllib.parse import quote
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
+_SUPPORTED_LANGS = {"ru", "en"}
+_LANG_COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # год - предпочтение языка, не секрет, долгий cookie ок
+
+
+def _lang_from_request(request: Request) -> str:
+    """?lang=en в query - явный переключатель (см. templates._lang_switch),
+
+    иначе - ранее сохранённый cookie, иначе - русский по умолчанию."""
+    lang = request.query_params.get("lang") or request.cookies.get("lang") or "ru"
+    return lang if lang in _SUPPORTED_LANGS else "ru"
+
+
+def _apply_lang_cookie(response: Response, request: Request, lang: str) -> Response:
+    """Если язык был передан явно через ?lang=, закрепляем его в cookie,
+
+    чтобы дальнейшая навигация (клики по ссылкам без ?lang=) его помнила."""
+    if request.query_params.get("lang") in _SUPPORTED_LANGS:
+        response.set_cookie("lang", lang, max_age=_LANG_COOKIE_MAX_AGE)
+    return response
+
 from garmin_pipeline import config, ollama_setup
 from garmin_pipeline.cache import get_connection, upsert_activity, upsert_daily_metrics
 from garmin_pipeline.client import get_client
@@ -78,10 +98,13 @@ def create_app() -> FastAPI:
     @app.get("/setup", response_class=HTMLResponse)
     def setup_get(request: Request) -> HTMLResponse:
         flash = request.query_params.get("flash")
-        return HTMLResponse(templates.setup_page(config.settings, flash=flash))
+        lang = _lang_from_request(request)
+        response = HTMLResponse(templates.setup_page(config.settings, flash=flash, lang=lang))
+        return _apply_lang_cookie(response, request, lang)
 
     @app.post("/setup")
     def setup_post(
+        request: Request,
         garmin_email: str = Form(""),
         garmin_password: str = Form(""),
         llm_base_url: str = Form(""),
@@ -101,7 +124,9 @@ def create_app() -> FastAPI:
                 "telegram_allowed_user_id": telegram_allowed_user_id.strip(),
             }
         )
-        return RedirectResponse(url=f"/dashboard?flash={quote('Настройки сохранены')}", status_code=303)
+        lang = _lang_from_request(request)
+        flash = templates.tr("flash_settings_saved", lang)
+        return RedirectResponse(url=f"/dashboard?flash={quote(flash)}&lang={lang}", status_code=303)
 
     @app.get("/api/ollama/status")
     def ollama_status() -> JSONResponse:
@@ -129,19 +154,23 @@ def create_app() -> FastAPI:
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:
         flash = request.query_params.get("flash")
+        lang = _lang_from_request(request)
         summary = library_summary()
-        return HTMLResponse(templates.dashboard_page(summary, config.settings, flash=flash))
+        response = HTMLResponse(templates.dashboard_page(summary, config.settings, flash=flash, lang=lang))
+        return _apply_lang_cookie(response, request, lang)
 
     @app.post("/dashboard/run/context")
-    def run_context() -> RedirectResponse:
+    def run_context(request: Request) -> RedirectResponse:
         client = get_client(interactive=False)
         ctx = build_context(client, days=14)
         write_context(render_context_md(ctx))
         update_index()
-        return RedirectResponse(url=f"/dashboard?flash={quote('Снапшот обновлён')}", status_code=303)
+        lang = _lang_from_request(request)
+        flash = templates.tr("flash_context_updated", lang)
+        return RedirectResponse(url=f"/dashboard?flash={quote(flash)}&lang={lang}", status_code=303)
 
     @app.post("/dashboard/run/daily")
-    def run_daily() -> RedirectResponse:
+    def run_daily(request: Request) -> RedirectResponse:
         client = get_client(interactive=False)
         today = date_cls.today().isoformat()
         with get_connection() as conn:
@@ -151,43 +180,61 @@ def create_app() -> FastAPI:
                 upsert_activity(conn, _activity_to_summary(act))
         write_daily(today, render_daily_md(bundle.as_render_dict()))
         update_index()
-        return RedirectResponse(url=f"/dashboard?flash={quote('Дневной отчёт собран')}", status_code=303)
+        lang = _lang_from_request(request)
+        flash = templates.tr("flash_daily_ready", lang)
+        return RedirectResponse(url=f"/dashboard?flash={quote(flash)}&lang={lang}", status_code=303)
 
     @app.post("/dashboard/run/weekly")
-    def run_weekly() -> RedirectResponse:
+    def run_weekly(request: Request) -> RedirectResponse:
         client = get_client(interactive=False)
         week = build_weekly_report(client)
         write_weekly(week["week_label"], render_weekly_md(week))
         update_index()
-        return RedirectResponse(url=f"/dashboard?flash={quote('Недельный отчёт собран')}", status_code=303)
+        lang = _lang_from_request(request)
+        flash = templates.tr("flash_weekly_ready", lang)
+        return RedirectResponse(url=f"/dashboard?flash={quote(flash)}&lang={lang}", status_code=303)
 
     @app.post("/dashboard/run/range")
-    def run_range(date_from: str = Form(...), date_to: str = Form(...)) -> RedirectResponse:
+    def run_range(request: Request, date_from: str = Form(...), date_to: str = Form(...)) -> RedirectResponse:
         client = get_client(interactive=False)
         report = build_range_report(client, date_from, date_to)
         write_range_report(date_from, date_to, render_range_report_md(report))
         update_index()
-        return RedirectResponse(url=f"/range?from={date_from}&to={date_to}", status_code=303)
+        lang = _lang_from_request(request)
+        return RedirectResponse(url=f"/range?from={date_from}&to={date_to}&lang={lang}", status_code=303)
 
     @app.get("/range", response_class=HTMLResponse)
     def range_view(request: Request) -> HTMLResponse:
+        lang = _lang_from_request(request)
         date_from = request.query_params.get("from")
         date_to = request.query_params.get("to")
         if not date_from or not date_to:
-            return HTMLResponse(templates.view_page("Ошибка", "Не указан период (from/to)."), status_code=400)
+            error = HTMLResponse(
+                templates.view_page(templates.tr("error_title", lang), templates.tr("error_no_range", lang), lang=lang),
+                status_code=400,
+            )
+            return _apply_lang_cookie(error, request, lang)
         # Читаем из кэша (см. range_report.py) - без похода в Garmin API, так
         # что страницу можно спокойно перезагружать/расшаривать без лимитов.
         report = range_report_from_cache(date_from, date_to)
-        return HTMLResponse(templates.range_report_page(report))
+        response = HTMLResponse(templates.range_report_page(report, lang=lang))
+        return _apply_lang_cookie(response, request, lang)
 
     @app.get("/view", response_class=HTMLResponse)
-    def view(category: str, name: str) -> HTMLResponse:
+    def view(request: Request, category: str, name: str) -> HTMLResponse:
+        lang = _lang_from_request(request)
         if category not in _KNOWN_CATEGORIES or "/" in name or ".." in name:
-            return HTMLResponse(templates.view_page("Ошибка", "Некорректный путь."), status_code=400)
+            return HTMLResponse(
+                templates.view_page(templates.tr("error_title", lang), templates.tr("error_bad_path", lang), lang=lang),
+                status_code=400,
+            )
         relative = "context.md" if category == "context" else f"{category}/{name}"
         content = read_library_file(relative)
         if content is None:
-            return HTMLResponse(templates.view_page(name, "Файл не найден."), status_code=404)
-        return HTMLResponse(templates.view_page(name, content))
+            return HTMLResponse(
+                templates.view_page(name, templates.tr("error_file_not_found", lang), lang=lang), status_code=404
+            )
+        response = HTMLResponse(templates.view_page(name, content, lang=lang))
+        return _apply_lang_cookie(response, request, lang)
 
     return app
