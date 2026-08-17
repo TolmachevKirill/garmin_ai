@@ -257,18 +257,32 @@ _SPORT_RU = {
 def describe_call(name: str, arguments: dict[str, Any]) -> str:
     """Человекочитаемое (по-русски) описание write-действия для сообщения-
 
-    подтверждения перед выполнением в боте (см. bot.py)."""
+    подтверждения перед выполнением в боте (см. bot.py). Для create_workout
+    показывает длительность и разбивку шагов/зон - чтобы человек мог поймать
+    ошибку модели до записи в Garmin, а не после."""
     if name == "create_workout":
-        sport = _SPORT_RU.get(arguments.get("sport", ""), arguments.get("sport", "?"))
+        from garmin_pipeline.collectors.workouts import validate_workout_steps
+
+        sport_key = arguments.get("sport", "")
+        sport = _SPORT_RU.get(sport_key, sport_key or "?")
         title = arguments.get("name", "без названия")
         date = arguments.get("date")
-        n_steps = 0
-        try:
-            n_steps = len(json.loads(arguments.get("steps_json") or "[]"))
-        except (json.JSONDecodeError, TypeError):
-            pass
         when = f" на {date}" if date else " (без даты - в библиотеку)"
-        return f"Создать тренировку «{title}» ({sport}, {n_steps} шаг(ов)){when}?"
+        try:
+            steps = json.loads(arguments.get("steps_json") or "[]")
+            summary = validate_workout_steps(sport_key, steps)
+            plan = "\n".join(f"- {line}" for line in summary["lines"])
+            return (
+                f"Создать тренировку «{title}» ({sport}, ~{summary['estimated_duration']})"
+                f"{when}?\n{plan}"
+            )
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            # План битый - всё равно покажем Confirm с причиной, execute_tool
+            # вернёт ту же ошибку и Garmin не тронет.
+            return (
+                f"Создать тренировку «{title}» ({sport}){when}?\n"
+                f"⚠️ План не прошёл проверку: {exc}"
+            )
     if name == "delete_workout":
         return f"Удалить тренировку id={arguments.get('workout_id')} из библиотеки Garmin? Это необратимо."
     if name == "upload_activity_file":

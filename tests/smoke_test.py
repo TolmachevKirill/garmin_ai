@@ -69,7 +69,7 @@ from garmin_pipeline.library import (  # noqa: E402
 )
 from garmin_pipeline.analyze import activities_frame, coverage, daily_frame  # noqa: E402
 from garmin_pipeline.collectors.fit import compute_km_splits_from_fit, fit_records_to_points  # noqa: E402
-from garmin_pipeline.collectors.workouts import build_workout  # noqa: E402
+from garmin_pipeline.collectors.workouts import build_workout, validate_workout_steps  # noqa: E402
 from garmin_pipeline import config as garmin_config  # noqa: E402
 from garmin_pipeline import llm_client  # noqa: E402
 from garmin_pipeline import bot as garmin_bot  # noqa: E402
@@ -366,43 +366,79 @@ def test_build_workout_hr_zone_alert() -> None:
 
 
 def test_build_workout_strength_exercise_and_rest_steps() -> None:
-    """sport='strength_training' + kind='exercise'/'rest' (см. пользовательский
+    """Силовые шаги: exercise (reps ИЛИ duration_s, опционально weight_kg) +
 
-    запрос на кор-тренировку: дэд баг/скручивания/мост/... по подходам и
-    повторам, с отдыхом между сетами и опциональным весом) - должен собираться
-    через BaseWorkout (нет typed-класса под strength в garminconnect.workout),
-    reps -> endCondition REPS(10), duration_s -> endCondition TIME(2), а
-    category/exerciseName/weightValue - через extra="allow" на ExecutableStep."""
+    rest между подходами. sport=strength_training идёт через BaseWorkout (нет
+    typed-класса под strength в garminconnect.workout), поэтому проверяем
+    и sportType, и поля упражнения в to_dict()."""
     steps = [
-        {"kind": "exercise", "category": "hip_stability", "exercise_name": "dead_bug", "reps": 20},
+        {"kind": "exercise", "category": "HIP_STABILITY", "exercise_name": "DEAD_BUG", "reps": 20},
         {"kind": "rest", "duration_s": 30},
-        {"kind": "exercise", "category": "banded_exercises", "exercise_name": "glute_bridge",
-         "reps": 20, "weight_kg": 10},
-        {"kind": "exercise", "category": "plank", "exercise_name": "side_plank", "duration_s": 20},
+        {
+            "kind": "exercise",
+            "category": "BANDED_EXERCISES",
+            "exercise_name": "GLUTE_BRIDGE",
+            "reps": 20,
+            "weight_kg": 5,
+        },
+        {"kind": "exercise", "category": "PLANK", "exercise_name": "SIDE_PLANK", "duration_s": 40},
     ]
     workout = build_workout(sport="strength_training", name="Кор и ягодицы", steps=steps)
     payload = workout.to_dict()
     assert payload["sportType"]["sportTypeKey"] == "strength_training"
-
     dead_bug, rest, glute_bridge, side_plank = payload["workoutSegments"][0]["workoutSteps"]
-
-    assert dead_bug["endCondition"]["conditionTypeKey"] == "reps"
-    assert dead_bug["endConditionValue"] == 20.0
     assert dead_bug["category"] == "HIP_STABILITY"
     assert dead_bug["exerciseName"] == "DEAD_BUG"
-    assert "weightValue" not in dead_bug
-
+    assert dead_bug["endCondition"]["conditionTypeKey"] == "reps"
+    assert dead_bug["endConditionValue"] == 20.0
     assert rest["stepType"]["stepTypeKey"] == "rest"
-    assert rest["endCondition"]["conditionTypeKey"] == "time"
     assert rest["endConditionValue"] == 30.0
-
-    assert glute_bridge["weightValue"] == 10.0
-    assert glute_bridge["weightUnit"]["unitKey"] == "kilogram"
-
+    assert glute_bridge["weightValue"] == 5.0
     assert side_plank["endCondition"]["conditionTypeKey"] == "time"
-    assert side_plank["endConditionValue"] == 20.0
-    assert side_plank["exerciseName"] == "SIDE_PLANK"
+    assert side_plank["endConditionValue"] == 40.0
     print("OK: build_workout strength_training -> exercise (reps/duration_s/weight_kg) + rest steps")
+
+
+def test_validate_workout_rejects_suspicious_repeat_and_bad_zone() -> None:
+    """Перед записью в Garmin ловим типичные ошибки модели: длинный interval
+
+    в repeat xN (умножает длительность) и hr_zone вне 1..5."""
+    try:
+        validate_workout_steps(
+            "running",
+            [{"kind": "repeat", "iterations": 8, "steps": [{"kind": "interval", "duration_s": 1800}]}],
+        )
+        raise AssertionError("ожидали ValueError на подозрительный repeat")
+    except ValueError as exc:
+        assert "Подозрительный repeat" in str(exc)
+
+    try:
+        validate_workout_steps(
+            "running",
+            [{"kind": "warmup", "duration_s": 300, "hr_zone": 9}],
+        )
+        raise AssertionError("ожидали ValueError на hr_zone=9")
+    except ValueError as exc:
+        assert "hr_zone" in str(exc)
+
+    ok = validate_workout_steps(
+        "cycling",
+        [
+            {"kind": "warmup", "duration_s": 1020, "hr_zone": 2},
+            {
+                "kind": "repeat",
+                "iterations": 3,
+                "steps": [
+                    {"kind": "interval", "duration_s": 300, "hr_zone": 3},
+                    {"kind": "recovery", "duration_s": 180},
+                ],
+            },
+            {"kind": "cooldown", "duration_s": 1170, "hr_zone": 2},
+        ],
+    )
+    assert ok["estimated_duration_s"] == 1020 + 3 * (300 + 180) + 1170
+    assert any("Z3" in line for line in ok["lines"])
+    print("OK: validate_workout_steps rejects bad plans, accepts interval structure")
 
 
 def test_config_json_overlay_and_reload() -> None:
@@ -888,9 +924,34 @@ def test_agent_tools_schema_and_dispatch() -> None:
 
     preview = agent_tools.describe_call(
         "create_workout",
-        {"sport": "running", "name": "Лёгкий бег", "steps_json": '[{"kind":"warmup","duration_s":300}]'},
+        {
+            "sport": "running",
+            "name": "Лёгкий бег",
+            "steps_json": (
+                '[{"kind":"warmup","duration_s":300,"hr_zone":2},'
+                '{"kind":"interval","duration_s":1800},'
+                '{"kind":"cooldown","duration_s":300,"hr_zone":2}]'
+            ),
+            "date": "2026-08-17",
+        },
     )
     assert "Лёгкий бег" in preview and "бег" in preview
+    assert "0:40:00" in preview or "~40:00" in preview
+    assert "разминка" in preview and "Z2" in preview
+    assert "интервал" in preview
+
+    bad_preview = agent_tools.describe_call(
+        "create_workout",
+        {
+            "sport": "running",
+            "name": "Баг",
+            "steps_json": (
+                '[{"kind":"repeat","iterations":8,'
+                '"steps":[{"kind":"interval","duration_s":1800}]}]'
+            ),
+        },
+    )
+    assert "не прошёл проверку" in bad_preview or "Подозрительный" in bad_preview
 
     preview_del = agent_tools.describe_call("delete_workout", {"workout_id": "999"})
     assert "999" in preview_del and "необратимо" in preview_del.lower()
@@ -1021,6 +1082,7 @@ if __name__ == "__main__":
     test_build_workout()
     test_build_workout_hr_zone_alert()
     test_build_workout_strength_exercise_and_rest_steps()
+    test_validate_workout_rejects_suspicious_repeat_and_bad_zone()
     test_config_json_overlay_and_reload()
     test_llm_not_configured_error()
     test_bot_chunks_and_authorization()

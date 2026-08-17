@@ -205,8 +205,22 @@ def create_workout(sport: str, name: str, steps_json: str, date: str | None = No
     """
     client = get_client(interactive=False)
     steps = json.loads(steps_json)
+    if not isinstance(steps, list):
+        raise ValueError("steps_json должен быть JSON-массивом шагов")
+    # validate_workout_steps вызывается внутри build_workout - здесь явно,
+    # чтобы сломанный план отвалился до похода в Garmin API с понятной ошибкой.
+    from garmin_pipeline.collectors.workouts import validate_workout_steps
+
+    summary = validate_workout_steps(sport, steps)
     result = create_and_schedule(client, sport=sport, name=name, steps=steps, schedule_date=date)
-    return {"workout_id": result.get("workout_id"), "scheduled_date": date, "sport": sport, "name": name}
+    return {
+        "workout_id": result.get("workout_id"),
+        "scheduled_date": date,
+        "sport": sport,
+        "name": name,
+        "estimated_duration_s": summary["estimated_duration_s"],
+        "estimated_duration": summary["estimated_duration"],
+    }
 
 
 def delete_workout(workout_id: str) -> dict[str, Any]:

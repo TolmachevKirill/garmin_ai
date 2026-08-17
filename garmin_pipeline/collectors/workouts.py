@@ -226,6 +226,169 @@ def _estimate_duration_s(steps: list[dict[str, Any]]) -> int:
     return int(total)
 
 
+# Жёсткие границы перед записью в Garmin: ошибка в отчёте портит markdown,
+# ошибка в интервалах/зонах портит тренировку на часах (см. human-in-the-loop
+# в bot.py - валидация + понятный preview до Confirm).
+_MAX_WORKOUT_DURATION_S = 5 * 3600  # 5ч - выше почти всегда баг модели, не план
+_MAX_STEP_DURATION_S = 3 * 3600
+_SUSPICIOUS_SINGLE_INTERVAL_S = 600  # 10 мин: длинный кусок в repeat xN = типичный баг
+
+
+def _fmt_duration_short(seconds: float | int) -> str:
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def _iterations_of(spec: dict[str, Any]) -> int:
+    raw = spec.get("iterations", spec.get("repeat"))
+    if raw is None:
+        raise ValueError("У шага repeat должно быть указано 'iterations' (число повторов)")
+    iterations = int(raw)
+    if iterations < 1 or iterations > 50:
+        raise ValueError(f"iterations у repeat должно быть 1..50, получено: {iterations}")
+    return iterations
+
+
+def _validate_hr_zone(spec: dict[str, Any]) -> None:
+    if "hr_zone" not in spec or spec["hr_zone"] is None:
+        return
+    zone = int(spec["hr_zone"])
+    if zone < 1 or zone > 5:
+        raise ValueError(f"hr_zone должна быть 1..5, получено: {zone}")
+
+
+def _validate_step(spec: dict[str, Any], *, inside_repeat: bool = False) -> None:
+    if not isinstance(spec, dict):
+        raise ValueError(f"Шаг должен быть объектом, получено: {type(spec).__name__}")
+    kind = spec.get("kind")
+    if kind == "repeat":
+        if inside_repeat:
+            raise ValueError("Вложенный repeat внутри repeat не поддерживается")
+        nested = spec.get("steps")
+        if not isinstance(nested, list) or not nested:
+            raise ValueError("У шага repeat должен быть непустой список 'steps'")
+        iterations = _iterations_of(spec)
+        # Типичный баг LLM: обернуть одну длинную непрерывную пробежку в
+        # repeat xN -> длительность умножается в N раз (30 мин x 8 = 4ч).
+        if iterations >= 2 and len(nested) == 1:
+            only = nested[0]
+            if (
+                isinstance(only, dict)
+                and only.get("kind") in {"warmup", "interval", "recovery", "cooldown"}
+                and only.get("duration_s") is not None
+                and float(only["duration_s"]) >= _SUSPICIOUS_SINGLE_INTERVAL_S
+            ):
+                raise ValueError(
+                    "Подозрительный repeat: один длинный непрерывный шаг "
+                    f"({_fmt_duration_short(only['duration_s'])}) × {iterations}. "
+                    "Для простой непрерывной тренировки используй один interval "
+                    "(плюс warmup/cooldown) БЕЗ repeat. repeat - только для "
+                    "настоящих интервалов с работой+восстановлением внутри."
+                )
+        for child in nested:
+            _validate_step(child, inside_repeat=True)
+        return
+
+    if kind in {"warmup", "interval", "recovery", "cooldown", "rest"}:
+        if spec.get("duration_s") is None:
+            raise ValueError(f"У шага {kind} должно быть 'duration_s'")
+        duration_s = float(spec["duration_s"])
+        if duration_s <= 0:
+            raise ValueError(f"duration_s у {kind} должно быть > 0, получено: {duration_s}")
+        if duration_s > _MAX_STEP_DURATION_S:
+            raise ValueError(
+                f"duration_s у {kind} слишком большое ({_fmt_duration_short(duration_s)}), "
+                f"макс. {_fmt_duration_short(_MAX_STEP_DURATION_S)}"
+            )
+        _validate_hr_zone(spec)
+        return
+
+    if kind == "exercise":
+        if not spec.get("category") or not spec.get("exercise_name"):
+            raise ValueError("У шага exercise нужны 'category' и 'exercise_name' из справочника Garmin")
+        reps, duration_s = spec.get("reps"), spec.get("duration_s")
+        if reps is None and duration_s is None:
+            raise ValueError("У шага exercise должно быть 'reps' или 'duration_s'")
+        if reps is not None:
+            reps_i = int(reps)
+            if reps_i < 1 or reps_i > 200:
+                raise ValueError(f"reps у exercise должно быть 1..200, получено: {reps_i}")
+        if duration_s is not None:
+            d = float(duration_s)
+            if d <= 0 or d > 3600:
+                raise ValueError(f"duration_s у exercise должно быть 1..3600, получено: {d}")
+        if spec.get("weight_kg") is not None and float(spec["weight_kg"]) < 0:
+            raise ValueError("weight_kg не может быть отрицательным")
+        return
+
+    raise ValueError(
+        f"Неизвестный тип шага: {kind!r} "
+        "(ожидались warmup/interval/recovery/cooldown/repeat/exercise/rest)"
+    )
+
+
+def validate_workout_steps(sport: str, steps: list[dict[str, Any]]) -> dict[str, Any]:
+    """Проверяет план тренировки до upload в Garmin. Бросает ValueError
+
+    при структурных ошибках (битые зоны, опасный repeat, нереальная
+    длительность). Возвращает краткое summary для preview в Confirm."""
+    if sport not in _SPORT_TYPES:
+        raise ValueError(f"Поддерживаются sport={sorted(_SPORT_TYPES)}, получено: {sport!r}")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("steps должен быть непустым списком шагов")
+    for step in steps:
+        _validate_step(step)
+    estimated = _estimate_duration_s(steps)
+    if estimated > _MAX_WORKOUT_DURATION_S:
+        raise ValueError(
+            f"Суммарная длительность {_fmt_duration_short(estimated)} больше "
+            f"лимита {_fmt_duration_short(_MAX_WORKOUT_DURATION_S)} - "
+            "похоже на ошибку в шагах (часто лишний repeat), а не на план."
+        )
+    return {
+        "sport": sport,
+        "estimated_duration_s": estimated,
+        "estimated_duration": _fmt_duration_short(estimated),
+        "lines": summarize_steps(steps),
+    }
+
+
+def summarize_steps(steps: list[dict[str, Any]], *, indent: str = "") -> list[str]:
+    """Человекочитаемые строки плана для сообщения Confirm в Telegram."""
+    lines: list[str] = []
+    for s in steps:
+        kind = s.get("kind")
+        if kind == "repeat":
+            iterations = s.get("iterations", s.get("repeat", "?"))
+            lines.append(f"{indent}повтор ×{iterations}:")
+            lines.extend(summarize_steps(s.get("steps") or [], indent=indent + "  "))
+            continue
+        if kind == "exercise":
+            name = str(s.get("exercise_name") or "exercise").replace("_", " ").title()
+            if s.get("reps") is not None:
+                detail = f"{s['reps']} повт."
+            else:
+                detail = _fmt_duration_short(s.get("duration_s") or 0)
+            weight = f", {s['weight_kg']} кг" if s.get("weight_kg") is not None else ""
+            lines.append(f"{indent}{name}: {detail}{weight}")
+            continue
+        label = {
+            "warmup": "разминка",
+            "interval": "интервал",
+            "recovery": "восстановление",
+            "cooldown": "заминка",
+            "rest": "отдых",
+        }.get(kind, kind or "?")
+        dur = _fmt_duration_short(s.get("duration_s") or 0) if s.get("duration_s") is not None else "?"
+        zone = f", Z{int(s['hr_zone'])}" if s.get("hr_zone") is not None else ""
+        lines.append(f"{indent}{label}: {dur}{zone}")
+    return lines
+
+
 def build_workout(
     *,
     sport: str,
@@ -278,6 +441,8 @@ def build_workout(
         raise ValueError(
             f"Поддерживаются sport={sorted(_SPORT_TYPES)}, получено: {sport!r}"
         )
+
+    validate_workout_steps(sport, steps)
 
     counter = _StepOrderCounter()
     built_steps = [_build_step(s, counter) for s in steps]
