@@ -2,6 +2,12 @@
 
 *[Читать на русском](README.md)*
 
+**Self-hosted AI agent for Garmin Connect**: reads sleep, HRV, stress, Body Battery and workouts, answers questions and creates workouts in Garmin through a Telegram bot or ChatGPT — no third-party server, your own keys, or fully local.
+
+[![Download for Windows](https://img.shields.io/badge/Download-Windows%20.exe-2383e2?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/TolmachevKirill/garmin_ai/releases/latest)
+
+![Garmin Health Pipeline dashboard: integration status, quick actions, report library](docs/screenshot-dashboard.png)
+
 Pulls your data out of Garmin Connect, caches it locally, and turns it into:
 
 1. a **file "library"** (markdown + CSV) for manually uploading to a ChatGPT
