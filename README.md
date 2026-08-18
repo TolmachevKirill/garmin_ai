@@ -436,6 +436,28 @@ Telegram-бот запускается один раз при старте пр�
 подключения нужен перезапуск `.exe` (веб-интерфейс и учётные данные
 Garmin/LLM подхватываются на лету, без перезапуска).
 
+## macOS-дистрибутив (.app)
+
+Тот же `desktop_app.py`, но в виде `.app`-бандла — без консоли, со своей
+иконкой. PyInstaller не кросс-компилирует, поэтому собрать `.app` можно
+только на самой macOS: разработка идёт на Windows, так что сборка живёт в
+[`.github/workflows/build-macos.yml`](.github/workflows/build-macos.yml) и
+гоняется на GitHub Actions (раннеры `macos-13`/Intel и `macos-14`/Apple
+Silicon — по одному zip на каждую архитектуру).
+
+Скачать готовую сборку — на [странице релизов](https://github.com/TolmachevKirill/garmin_ai/releases/latest)
+(если ассет `-macos-` там ещё не появился, workflow можно запустить вручную
+из вкладки Actions). Собрать самостоятельно на своём Mac:
+
+```bash
+pip install -r requirements.txt pyinstaller
+pyinstaller desktop_app_mac.spec --noconfirm
+```
+
+(перед этим нужен `icon.icns` рядом со spec-файлом — см. шаг "Build .icns
+from source PNG" в workflow, он собирает его из `packaging/mac-icon.png`
+через `sips`/`iconutil`, которые есть только на macOS).
+
 ## Важные оговорки
 
 - Это неофициальный доступ к Garmin Connect (`python-garminconnect`) — при

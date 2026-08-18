@@ -1,0 +1,105 @@
+name: Build macOS distribution
+
+# Разработка идёт на Windows, а PyInstaller не кросс-компилирует - macOS-бинарник
+# можно собрать только на реальной macOS. Поэтому сборка живёт здесь, на
+# GitHub-раннерах, а не в desktop_app.spec/scripts на Windows-машине разработчика.
+#
+# Запуск:
+# - вручную (Actions -> Build macOS distribution -> Run workflow), можно
+#   указать существующий тег релиза, чтобы сразу прикрепить .zip к нему;
+# - автоматически при пуше тега vX.Y.Z - в этом случае артефакты сами
+#   прикрепляются к релизу с этим тегом (см. gh release upload ниже).
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Тег существующего релиза, к которому прикрепить .zip (пусто = не прикреплять, только artifact)"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # macos-13 = Intel runner -> x86_64-бинарник, запускается и на Intel
+          # Mac, и на Apple Silicon через Rosetta 2.
+          - runner: macos-13
+            arch: x64
+          # macos-14 = Apple Silicon runner -> нативный arm64-бинарник.
+          - runner: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build .icns from source PNG
+        run: |
+          mkdir -p icon.iconset
+          sips -z 16 16     packaging/mac-icon.png --out icon.iconset/icon_16x16.png
+          sips -z 32 32     packaging/mac-icon.png --out icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     packaging/mac-icon.png --out icon.iconset/icon_32x32.png
+          sips -z 64 64     packaging/mac-icon.png --out icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   packaging/mac-icon.png --out icon.iconset/icon_128x128.png
+          sips -z 256 256   packaging/mac-icon.png --out icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   packaging/mac-icon.png --out icon.iconset/icon_256x256.png
+          sips -z 512 512   packaging/mac-icon.png --out icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   packaging/mac-icon.png --out icon.iconset/icon_512x512.png
+          sips -z 1024 1024 packaging/mac-icon.png --out icon.iconset/icon_512x512@2x.png
+          iconutil -c icns icon.iconset -o icon.icns
+
+      - name: Determine version
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.release_tag }}"
+          if [ -z "$TAG" ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
+          if [ -z "$VERSION" ]; then
+            VERSION="0.0.0-dev"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build app bundle
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: pyinstaller desktop_app_mac.spec
+
+      - name: Zip app bundle
+        id: zip
+        run: |
+          cd dist
+          ZIP_NAME="GarminHealthPipeline-${{ steps.version.outputs.tag || 'dev' }}-macos-${{ matrix.arch }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent GarminHealthPipeline.app "$ZIP_NAME"
+          echo "zip_path=dist/$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GarminHealthPipeline-macos-${{ matrix.arch }}
+          path: ${{ steps.zip.outputs.zip_path }}
+
+      - name: Attach to GitHub release
+        if: steps.version.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ steps.version.outputs.tag }}" "${{ steps.zip.outputs.zip_path }}" --clobber

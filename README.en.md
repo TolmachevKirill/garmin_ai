@@ -448,6 +448,30 @@ or changed through `/setup` while the app is already running, the bot needs
 an `.exe` restart to pick it up (the web interface and Garmin/LLM
 credentials are picked up live, no restart needed).
 
+## macOS distribution (.app)
+
+Same `desktop_app.py`, packaged as a proper `.app` bundle — no terminal
+window, its own icon. PyInstaller doesn't cross-compile, so a `.app` can
+only be built on actual macOS: development happens on Windows, so this
+build lives in
+[`.github/workflows/build-macos.yml`](.github/workflows/build-macos.yml)
+and runs on GitHub Actions (`macos-13`/Intel and `macos-14`/Apple Silicon
+runners — one zip per architecture).
+
+Download a prebuilt copy from the
+[releases page](https://github.com/TolmachevKirill/garmin_ai/releases/latest)
+(if a `-macos-` asset isn't there yet, trigger the workflow manually from
+the Actions tab). To build it yourself on your own Mac:
+
+```bash
+pip install -r requirements.txt pyinstaller
+pyinstaller desktop_app_mac.spec --noconfirm
+```
+
+(you'll need an `icon.icns` next to the spec file first — see the "Build
+.icns from source PNG" step in the workflow, which builds it from
+`packaging/mac-icon.png` via `sips`/`iconutil`, both macOS-only tools).
+
 ## Important caveats
 
 - This is unofficial access to Garmin Connect (`python-garminconnect`) — if

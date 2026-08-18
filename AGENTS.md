@@ -123,3 +123,10 @@ a skill-matching agent, but the command reference is agent-agnostic).
   cache first and only fetch missing/stale days from Garmin. Keep new
   range-style aggregations incremental too — don't reintroduce a "refetch
   everything every time" pattern.
+
+## GitHub releases
+
+GitHub has no language toggle on the Releases page. Every release title and
+body must be bilingual: Russian first (`## Что нового` / `### Обновление`),
+then a `---` and English (`## What's new` / `### Upgrading`). Title pattern:
+`vX.Y.Z — краткое по-русски / short English`.
