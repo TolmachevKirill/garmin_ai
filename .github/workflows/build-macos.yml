@@ -28,9 +28,11 @@ jobs:
     strategy:
       matrix:
         include:
-          # macos-13 = Intel runner -> x86_64-бинарник, запускается и на Intel
-          # Mac, и на Apple Silicon через Rosetta 2.
-          - runner: macos-13
+          # macos-15-intel = единственный оставшийся Intel-раннер GitHub (macos-13
+          # отправлен на пенсию в декабре 2025 - виснет в очереди навечно, если
+          # указать его) -> x86_64-бинарник, запускается и на Intel Mac, и на
+          # Apple Silicon через Rosetta 2.
+          - runner: macos-15-intel
             arch: x64
           # macos-14 = Apple Silicon runner -> нативный arm64-бинарник.
           - runner: macos-14
