@@ -14,13 +14,29 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+def _detect_project_root() -> Path:
+    """В собранном PyInstaller-`.exe` (`sys.frozen`) `__file__` этого модуля
+    указывает внутрь `_internal` (там, где PyInstaller распаковывает пакеты),
+    а не туда, где лежит сам `.exe`. Если резолвить пути от `__file__` как в
+    режиме разработки, `data/config.json` пишется внутрь `_internal` и
+    стирается при каждой пересборке `.exe` (`_internal` перегенерируется
+    целиком). Поэтому во frozen-сборке берём папку `sys.executable` - она не
+    трогается пересборкой и переживает обновления версии внутри той же папки.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+PROJECT_ROOT = _detect_project_root()
 load_dotenv(PROJECT_ROOT / ".env")
 
 
