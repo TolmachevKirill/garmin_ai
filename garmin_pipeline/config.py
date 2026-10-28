@@ -76,6 +76,16 @@ class Settings:
     llm_model: str | None = None
     telegram_bot_token: str | None = None
     telegram_allowed_user_id: str | None = None
+    # Официальный Garmin Connect Personal API (только чтение, см. personal_api.py).
+    personal_api_key: str | None = None
+    # "auto" - Personal API для чтения, если задан ключ (запись/readiness/
+    # силовые подходы - через логин/пароль); "personal" - только Personal API;
+    # "unofficial" - всегда python-garminconnect (как до появления Personal API).
+    garmin_backend: str = "auto"
+
+    def is_garmin_configured(self) -> bool:
+        """Есть хоть один способ войти в Garmin: личный ключ или email+пароль."""
+        return bool(self.personal_api_key) or bool(self.email)
 
     def is_llm_configured(self) -> bool:
         return bool(self.llm_api_key)
@@ -148,6 +158,8 @@ def load_settings() -> Settings:
         llm_model=pick("LLM_MODEL", "llm_model", "deepseek-ai/DeepSeek-V3.1"),
         telegram_bot_token=pick("TELEGRAM_BOT_TOKEN", "telegram_bot_token"),
         telegram_allowed_user_id=pick("TELEGRAM_ALLOWED_USER_ID", "telegram_allowed_user_id"),
+        personal_api_key=pick("GARMIN_PERSONAL_API_KEY", "personal_api_key"),
+        garmin_backend=(pick("GARMIN_BACKEND", "garmin_backend", "auto") or "auto").strip().lower(),
     )
 
 

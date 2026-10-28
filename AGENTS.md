@@ -124,6 +124,18 @@ a skill-matching agent, but the command reference is agent-agnostic).
   range-style aggregations incremental too — don't reintroduce a "refetch
   everything every time" pattern.
 
+- `client.get_client()` is a hybrid: if `GARMIN_PERSONAL_API_KEY` /
+ `personal_api_key` is set (backend `auto`/`personal`) it returns
+ `personal_api.PersonalApiClient` (official read-only Garmin Personal API,
+ mimics the `garminconnect.Garmin` methods collectors use); writes
+ (`upload_workout`, `schedule_workout`, `upload_activity`, ...) and unsupported
+ reads (training readiness) are delegated lazily to the password-login client
+ (`login_unofficial`). Collectors must keep using only methods that
+ `PersonalApiClient` implements, or add them there. After touching either
+ backend, compare them with `scripts/compare_backends.py --days 14 --splits`
+ (needs both key and login configured); `scripts/probe_personal_api.py` dumps
+ raw endpoint shapes to gitignored `data/probe/`. Never print the key.
+
 ## GitHub releases
 
 GitHub has no language toggle on the Releases page. Every release title and

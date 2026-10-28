@@ -41,7 +41,7 @@ from pathlib import Path
 
 from garmin_pipeline.analyze import coverage as cache_coverage
 from garmin_pipeline.cache import get_connection, upsert_activity, upsert_daily_metrics
-from garmin_pipeline.client import GarminLoginError, get_client
+from garmin_pipeline.client import GarminLoginError, get_client, login_unofficial
 from garmin_pipeline.collectors.activity import (
     fetch_activity_records,
     get_exercise_sets,
@@ -83,8 +83,11 @@ def _print_candidates(candidates: list[dict]) -> None:
 
 
 def cmd_login(_args: argparse.Namespace) -> int:
+    # Всегда логин по паролю (неофициальный клиент): нужен для записи тренировок/
+    # загрузки FIT и данных, которых нет в Personal API. Для одного чтения с
+    # ключом Personal API (GARMIN_PERSONAL_API_KEY) этот шаг не обязателен.
     try:
-        get_client(interactive=True)
+        login_unofficial(interactive=True)
     except GarminLoginError as err:
         print(f"Ошибка логина: {err}", file=sys.stderr)
         return 1

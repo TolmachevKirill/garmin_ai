@@ -53,8 +53,23 @@ STRINGS: dict[str, dict[str, str]] = {
     "status_ollama_optional": {"ru": "опционально", "en": "optional"},
     "card_garmin_title": {"ru": "Garmin Connect", "en": "Garmin Connect"},
     "card_garmin_sub": {
-        "ru": "Нужны только для первого логина — дальше используется сохранённый токен.",
-        "en": "Only needed for the first login — a saved token is reused after that.",
+        "ru": "Проще всего — личный API-ключ Garmin (ниже): без пароля и кода из SMS, только чтение. "
+        "Email и пароль нужны для записи (создание тренировок, загрузка FIT) и данных, которых нет в Personal API; "
+        "вводятся один раз — дальше используется сохранённый токен.",
+        "en": "Easiest: your personal Garmin API key (below) — no password or 2FA code, read-only. "
+        "Email and password are needed for writing (creating workouts, uploading FIT files) and for data the "
+        "Personal API doesn't offer; entered once — a saved token is reused after that.",
+    },
+    "label_personal_key": {"ru": "Personal API Key (официальный)", "en": "Personal API Key (official)"},
+    "personal_key_saved": {"ru": "ключ сохранён", "en": "key saved"},
+    "personal_key_placeholder": {"ru": "вставь ключ из Garmin Connect", "en": "paste the key from Garmin Connect"},
+    "personal_key_hint": {
+        "ru": "Создай на сайте Garmin Connect: страница «Personal API Key» → Create Key (срок — до года, "
+        "ключ показывается один раз). Только для твоих данных, не для сервисов на несколько пользователей. "
+        "<a href=\"https://developer.garmin.com/gc-developer-program/personal/personal-faq/\" target=\"_blank\" rel=\"noopener\">Подробнее</a>.",
+        "en": "Create it on the Garmin Connect website: the “Personal API Key” page → Create Key (valid up to a year, "
+        "shown only once). For your own data only, not for multi-user services. "
+        "<a href=\"https://developer.garmin.com/gc-developer-program/personal/personal-faq/\" target=\"_blank\" rel=\"noopener\">Learn more</a>.",
     },
     "label_email": {"ru": "Email", "en": "Email"},
     "label_password": {"ru": "Пароль", "en": "Password"},
@@ -583,7 +598,7 @@ def _setup_status_grid(settings: Any, lang: str) -> str:
       <div class="status-item">
         <div class="s-icon">🔗</div>
         <div class="s-label">Garmin</div>
-        {_chip(bool(settings.email), lang)}
+        {_chip(settings.is_garmin_configured(), lang)}
       </div>
       <div class="status-item">
         <div class="s-icon">🧠</div>
@@ -613,6 +628,9 @@ def setup_page(settings: Any, flash: str | None = None, lang: str = DEFAULT_LANG
     has_llm_key = tr("api_key_saved", lang) if settings.llm_api_key else "sk-..."
     has_telegram_token = tr("token_saved", lang) if settings.telegram_bot_token else tr("token_placeholder", lang)
     has_password = tr("password_saved", lang) if settings.password else tr("password_placeholder", lang)
+    has_personal_key = (
+        tr("personal_key_saved", lang) if settings.personal_api_key else tr("personal_key_placeholder", lang)
+    )
 
     body = f"""
     <div class="eyebrow">{tr('eyebrow_setup', lang)}</div>
@@ -627,6 +645,9 @@ def setup_page(settings: Any, flash: str | None = None, lang: str = DEFAULT_LANG
           <h2>{tr('card_garmin_title', lang)}</h2>
         </div>
         <div class="card-sub">{tr('card_garmin_sub', lang)}</div>
+        <label>{tr('label_personal_key', lang)}</label>
+        {_password_field("personal_api_key", placeholder=has_personal_key)}
+        <div class="hint">{tr('personal_key_hint', lang)}</div>
         <label>{tr('label_email', lang)}</label>
         <input name="garmin_email" value="{email}" placeholder="you@example.com">
         <label>{tr('label_password', lang)}</label>
@@ -743,7 +764,7 @@ def dashboard_page(summary: dict[str, Any], settings: Any, flash: str | None = N
       <div class="status-item">
         <div class="s-icon">🔗</div>
         <div class="s-label">Garmin</div>
-        {_chip(bool(settings.email), lang)}
+        {_chip(settings.is_garmin_configured(), lang)}
       </div>
       <div class="status-item">
         <div class="s-icon">🧠</div>

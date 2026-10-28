@@ -86,7 +86,7 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
-        target = "/dashboard" if config.settings.email else "/setup"
+        target = "/dashboard" if config.settings.is_garmin_configured() else "/setup"
         return RedirectResponse(url=target)
 
     @app.get("/favicon.ico", include_in_schema=False)
@@ -107,6 +107,7 @@ def create_app() -> FastAPI:
         request: Request,
         garmin_email: str = Form(""),
         garmin_password: str = Form(""),
+        personal_api_key: str = Form(""),
         llm_base_url: str = Form(""),
         llm_api_key: str = Form(""),
         llm_model: str = Form(""),
@@ -117,6 +118,7 @@ def create_app() -> FastAPI:
             {
                 "garmin_email": garmin_email.strip(),
                 "garmin_password": garmin_password,  # без .strip() - пароль как есть
+                "personal_api_key": personal_api_key.strip(),
                 "llm_base_url": llm_base_url.strip(),
                 "llm_api_key": llm_api_key.strip(),
                 "llm_model": llm_model.strip(),

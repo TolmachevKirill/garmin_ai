@@ -83,7 +83,7 @@ def _run_background_sync() -> None:
     from garmin_pipeline.collectors.sync import sync_recent_days
 
     while True:
-        if config.settings.email:
+        if config.settings.is_garmin_configured():
             try:
                 sync_recent_days(get_client(interactive=False), days=3)
             except Exception:
@@ -100,7 +100,7 @@ def main() -> None:
     threading.Thread(target=_run_background_sync, name="cache-sync", daemon=True).start()
 
     time.sleep(_STARTUP_DELAY_S)
-    target_path = "/dashboard" if config.settings.email else "/setup"
+    target_path = "/dashboard" if config.settings.is_garmin_configured() else "/setup"
     url = f"http://{HOST}:{PORT}{target_path}"
     logging.info("Открываю браузер: %s", url)
     try:

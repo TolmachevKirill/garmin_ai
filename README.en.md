@@ -110,19 +110,48 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Open `.env` and, if you want, fill in `GARMIN_EMAIL`/`GARMIN_PASSWORD` (only
-needed for the first login — a saved token is reused afterwards, and you can
-delete them from `.env`). The same file has optional fields for the LLM and
-Telegram bot (see [BYOK/BYOM LLM and Telegram bot](#byokbyom-llm-and-telegram-bot)) —
-it's usually easier to configure those once through the `/setup` web form
-(see below), which writes to `data/config.json`, which takes priority over
-`.env`.
+### Garmin access: official key or login/password
 
-First login (may ask for an MFA code):
+**Option 1 (easier, recommended): your personal Garmin API key.** Since October
+2026 Garmin offers every user a [Personal
+API](https://developer.garmin.com/gc-developer-program/personal/personal-faq/):
+on the Garmin Connect website open the “Personal API Key” page → *Create Key*
+(valid up to a year, shown only once) and put it in `.env`:
+
+```
+GARMIN_PERSONAL_API_KEY=<your key>
+```
+
+(or paste it into the “Personal API Key” field on the `/setup` page). It's an
+official, free channel for **reading your own data only**: no password, no MFA
+code, and it doesn't break when Garmin changes its login protection. It reads
+sleep, HRV, resting HR, stress, Body Battery, steps, activities, HR zones and
+original FIT files. Garmin's limits: the key is for you only (not for a
+multi-user service), it lives up to a year (you'll get an email a week before it
+expires — create a new one), and access tokens refresh automatically.
+
+**Option 2: login/password (unofficial `python-garminconnect`).** Needed if you
+want to **write** to Garmin (create workouts, upload FIT files from MyWhoosh,
+etc.) — the Personal API can't do that — and for training readiness. Put
+`GARMIN_EMAIL`/`GARMIN_PASSWORD` in `.env` and run once (may ask for an MFA
+code):
 
 ```powershell
 python -m garmin_pipeline.cli login
 ```
+
+A saved token is reused afterwards, and you can delete the password from `.env`.
+
+You can keep both (default mode `auto`): reading goes through the Personal API,
+and the unofficial login is attached lazily — only when a write is actually
+needed. To force one, set `GARMIN_BACKEND=personal` or `GARMIN_BACKEND=unofficial`
+(for comparing/debugging). If the key has expired but login/password is set up,
+the pipeline falls back to login/password on its own.
+
+The same file has optional fields for the LLM and Telegram bot (see
+[BYOK/BYOM LLM and Telegram bot](#byokbyom-llm-and-telegram-bot)) — it's usually
+easier to configure those once through the `/setup` web form (see below), which
+writes to `data/config.json`, which takes priority over `.env`.
 
 ## Commands
 

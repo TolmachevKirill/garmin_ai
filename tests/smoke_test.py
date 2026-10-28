@@ -1068,6 +1068,250 @@ def test_ollama_setup_status_does_not_crash_without_server() -> None:
     print("OK: ollama_setup.status() безопасен без установленной Ollama ->", st)
 
 
+def _personal_transport(calls: list[str], *, token_status: int = 200, fail_first_401: bool = False):
+    """httpx.MockTransport, имитирующий Garmin Personal API (формы ответов сняты с реального ключа)."""
+    import httpx
+
+    state = {"unauthorized_sent": False}
+    day_activity = {
+        "activityId": 111, "activityName": "Zwift", "startTimeLocal": "2026-10-18 10:00:00",
+        "activityType": {"typeKey": "virtual_ride"}, "distance": 20000.0, "duration": 3600.0,
+        "averageHR": 125.0, "maxHR": 150.0, "hrTimeInZone_1": 60.0, "hrTimeInZone_2": 1800.0,
+        "hrTimeInZone_3": 1200.0, "hrTimeInZone_4": 0.0, "hrTimeInZone_5": 0.0,
+    }
+    other_activity = {**day_activity, "activityId": 222, "activityType": {"typeKey": "yoga"}, "distance": 0.0}
+
+    def handler(request: "httpx.Request") -> "httpx.Response":
+        path = request.url.path
+        params = dict(request.url.params)
+        calls.append(path)
+        if path.endswith("/personal-api-key/token"):
+            assert request.headers["authorization"].startswith("ApiKey ")
+            return httpx.Response(token_status, text="jwt-token-123", headers={"content-type": "text/plain"})
+        assert request.headers["authorization"] == "Bearer jwt-token-123"
+        if fail_first_401 and not state["unauthorized_sent"]:
+            state["unauthorized_sent"] = True
+            return httpx.Response(401, json={})
+        if path == "/usersummary-service/usersummary/daily":
+            return httpx.Response(200, json={
+                "totalSteps": 4000, "totalDistanceMeters": 43000.0, "restingHeartRate": 55,
+                "averageStressLevel": 30, "bodyBatteryHighestValue": 90, "bodyBatteryLowestValue": 20,
+                "totalKilocalories": 2800.0, "activeKilocalories": 700.0,
+            })
+        if path == "/sleep-service/sleep/dailySleep":
+            return httpx.Response(200, json={
+                "sleepTimeSeconds": 28800, "deepSleepSeconds": 5400,
+                "sleepScores": {"overall": {"value": 81, "qualifierKey": "GOOD"}},
+            })
+        if path.startswith("/hrv-service/hrv/"):
+            return httpx.Response(200, json={"hrvSummary": {"lastNightAvg": 47, "status": "BALANCED"}})
+        if path.startswith("/metrics-service/metrics/trainingreadiness/"):
+            return httpx.Response(404, json={"error": "Not Found", "status": 404})
+        if path == "/biometric-service/heartRateZones/v2":
+            return httpx.Response(200, json=[{"sport": "DEFAULT", "zone1Floor": 91, "zone2Floor": 109,
+                                              "zone3Floor": 127, "zone4Floor": 146, "zone5Floor": 164}])
+        if path == "/activitylist-service/activities/search/activities":
+            if params.get("activityType") in ("virtual_ride", "yoga"):
+                return httpx.Response(400, json={})  # как у реального API на подтип
+            start = int(params.get("start", 0))
+            items = [day_activity, other_activity]
+            return httpx.Response(200, json=items[start:start + int(params.get("limit", 20))])
+        if path.endswith("/exerciseSets"):
+            return httpx.Response(404, json={})
+        if path.startswith("/download-service/files/activity/"):
+            return httpx.Response(200, content=b"PK-zip-bytes")
+        return httpx.Response(404, json={"error": "unexpected " + path})
+
+    return httpx.MockTransport(handler)
+
+
+def test_personal_api_client_adapts_to_garminconnect_surface() -> None:
+    from garminconnect import GarminConnectAuthenticationError, GarminConnectConnectionError
+    from garmin_pipeline import personal_api
+    from garmin_pipeline.collectors.activity import _is_subtype_error, get_hr_zones, search_activities
+
+    calls: list[str] = []
+    client = personal_api.PersonalApiClient("fake-key", transport=_personal_transport(calls), retry_sleep=lambda _s: None)
+
+    stats = client.typed.get_stats("2026-10-18")
+    assert (stats.total_steps, stats.total_distance_meters, stats.resting_heart_rate) == (4000, 43000.0, 55)
+    assert stats.body_battery_highest_value == 90 and stats.active_kilocalories == 700.0
+    assert stats.model_dump(by_alias=True)["totalDistanceMeters"] == 43000.0
+
+    sleep = client.typed.get_sleep_data("2026-10-18")
+    assert sleep.daily_sleep_dto.sleep_time_seconds == 28800
+    assert sleep.daily_sleep_dto.deep_sleep_seconds == 5400
+    assert sleep.daily_sleep_dto.sleep_scores.overall.value == 81
+    assert "dailySleepDTO" in sleep.model_dump(by_alias=True)
+
+    hrv = client.typed.get_hrv_data("2026-10-18")
+    assert (hrv.hrv_summary.last_night_avg, hrv.hrv_summary.status) == (47, "BALANCED")
+
+    # training readiness есть не у всех и в Personal API даёт 404 - без fallback это просто []
+    assert client.typed.get_training_readiness("2026-10-18") == []
+    n_readiness = sum(1 for c in calls if "trainingreadiness" in c)
+    assert client.typed.get_training_readiness("2026-10-19") == []
+    assert sum(1 for c in calls if "trainingreadiness" in c) == n_readiness, "после 404 эндпоинт не долбим повторно"
+
+    # список активностей + пагинация; формат строк совпадает с неофициальным API
+    assert [a["activityId"] for a in client.get_activities(start=0, limit=2)] == [111, 222]
+    personal_api._BY_DATE_PAGE, saved_page = 1, personal_api._BY_DATE_PAGE
+    try:
+        assert len(client.get_activities_by_date("2026-10-18", "2026-10-18")) == 2
+    finally:
+        personal_api._BY_DATE_PAGE = saved_page
+
+    # фильтр по подтипу: 400 -> текст, по которому activity.py откатывается на клиентскую фильтрацию
+    try:
+        client.get_activities(activitytype="virtual_ride")
+        raise AssertionError("ожидали ошибку подтипа")
+    except GarminConnectConnectionError as err:
+        assert _is_subtype_error(err), err
+    found = search_activities(client, date_from="2026-10-18", date_to="2026-10-18", activity_type="virtual_ride")
+    assert [a["activity_id"] for a in found] == ["111"]
+
+    # HR-зоны берутся из строки активности (hrTimeInZone_N) + пороги профиля
+    zones = client.get_activity_hr_in_timezones(111)
+    assert zones[0] == {"zoneNumber": 1, "secsInZone": 60.0, "zoneLowBoundary": 91}
+    assert [z["zoneLowBoundary"] for z in zones] == [91, 109, 127, 146, 164]
+    zones_report = get_hr_zones(client, "111")
+    assert round(sum(z["percent"] for z in zones_report)) == 100
+
+    # 404 на подходах - это "подходов нет", а не повод отключать эндпоинт
+    assert client.get_activity_exercise_sets(111) == {"activityId": 111, "exerciseSets": None}
+    assert client.download_activity(111, dl_fmt="ORIGINAL") == b"PK-zip-bytes"
+
+    # запись Personal API не умеет: без запасного клиента - понятная ошибка
+    try:
+        client.upload_workout({})
+        raise AssertionError("ожидали PersonalApiUnavailable")
+    except personal_api.PersonalApiUnavailable as err:
+        assert "только для чтения" in str(err)
+
+    # с запасным клиентом любые "чужие" методы и readiness делегируются ему
+    class FakeUnofficial:
+        class typed:  # noqa: N801
+            @staticmethod
+            def get_training_readiness(_d):
+                return ["from-fallback"]
+
+        def upload_workout(self, payload):
+            return {"workoutId": 42, "payload": payload}
+
+    fb_client = personal_api.PersonalApiClient(
+        "fake-key", fallback_factory=FakeUnofficial, transport=_personal_transport([]), retry_sleep=lambda _s: None
+    )
+    assert fb_client.upload_workout({"a": 1}) == {"workoutId": 42, "payload": {"a": 1}}
+    assert fb_client.typed.get_training_readiness("2026-10-18") == ["from-fallback"]
+
+    # токен: один 401 посреди сессии -> берём новый токен и повторяем запрос
+    refresh_calls: list[str] = []
+    retry_client = personal_api.PersonalApiClient(
+        "fake-key", transport=_personal_transport(refresh_calls, fail_first_401=True), retry_sleep=lambda _s: None
+    )
+    assert retry_client.typed.get_stats("2026-10-18").total_steps == 4000
+    assert sum(1 for c in refresh_calls if c.endswith("/personal-api-key/token")) == 2
+
+    # неверный/просроченный ключ -> понятная ошибка авторизации
+    bad = personal_api.PersonalApiClient("bad", transport=_personal_transport([], token_status=403), retry_sleep=lambda _s: None)
+    try:
+        bad.ensure_token()
+        raise AssertionError("ожидали ошибку авторизации")
+    except GarminConnectAuthenticationError as err:
+        assert "Personal API Key" in str(err)
+    print("OK: PersonalApiClient повторяет поверхность garminconnect (stats/sleep/hrv/activities/zones/FIT/fallback)")
+
+
+def test_get_client_backend_selection() -> None:
+    import dataclasses
+
+    from garminconnect import GarminConnectAuthenticationError
+    from garmin_pipeline import client as client_module
+    from garmin_pipeline.personal_api import PersonalApiClient
+
+    original_settings = garmin_config.settings
+    original_login = client_module.login_unofficial
+    original_cls = client_module.PersonalApiClient
+    sentinel = object()
+
+    class FakeOkPersonal(PersonalApiClient):
+        def ensure_token(self):
+            return "tok"
+
+    class FakeBadPersonal(PersonalApiClient):
+        def ensure_token(self):
+            raise GarminConnectAuthenticationError("ключ просрочен")
+
+    try:
+        client_module.login_unofficial = lambda interactive=True: sentinel
+
+        # auto + ключ -> Personal API
+        garmin_config.settings = dataclasses.replace(original_settings, personal_api_key="k", garmin_backend="auto")
+        client_module.PersonalApiClient = FakeOkPersonal
+        assert isinstance(client_module.get_client(interactive=False), FakeOkPersonal)
+
+        # unofficial всегда игнорирует ключ
+        garmin_config.settings = dataclasses.replace(original_settings, personal_api_key="k", garmin_backend="unofficial")
+        assert client_module.get_client(interactive=False) is sentinel
+
+        # без ключа - прежнее поведение (логин/пароль)
+        garmin_config.settings = dataclasses.replace(original_settings, personal_api_key=None, garmin_backend="auto")
+        assert client_module.get_client(interactive=False) is sentinel
+
+        # просроченный ключ + рабочий логин -> тихо уходим на логин/пароль
+        garmin_config.settings = dataclasses.replace(original_settings, personal_api_key="k", garmin_backend="auto")
+        client_module.PersonalApiClient = FakeBadPersonal
+        assert client_module.get_client(interactive=False) is sentinel
+
+        # просроченный ключ и логин тоже не удался -> одна понятная ошибка про оба способа
+        def failing_login(interactive=True):
+            raise client_module.GarminLoginError("нет сессии")
+
+        client_module.login_unofficial = failing_login
+        try:
+            client_module.get_client(interactive=False)
+            raise AssertionError("ожидали GarminLoginError")
+        except client_module.GarminLoginError as err:
+            assert "Personal API" in str(err) and "нет сессии" in str(err)
+
+        # backend=personal без ключа / с плохим ключом - ошибка, без тихого фолбэка на пароль
+        client_module.login_unofficial = lambda interactive=True: sentinel
+        garmin_config.settings = dataclasses.replace(original_settings, personal_api_key=None, garmin_backend="personal")
+        try:
+            client_module.get_client(interactive=False)
+            raise AssertionError("ожидали GarminLoginError")
+        except client_module.GarminLoginError:
+            pass
+        garmin_config.settings = dataclasses.replace(original_settings, personal_api_key="k", garmin_backend="personal")
+        try:
+            client_module.get_client(interactive=False)
+            raise AssertionError("ожидали GarminLoginError")
+        except client_module.GarminLoginError as err:
+            assert "просрочен" in str(err)
+    finally:
+        garmin_config.settings = original_settings
+        client_module.login_unofficial = original_login
+        client_module.PersonalApiClient = original_cls
+    print("OK: get_client выбирает бэкенд (auto/personal/unofficial) и честно сообщает об ошибках")
+
+
+def test_setup_page_personal_api_key_field_and_status() -> None:
+    import dataclasses
+
+    base = garmin_config.settings
+    with_key = dataclasses.replace(base, email=None, password=None, personal_api_key="secret-key-value")
+    without = dataclasses.replace(base, email=None, password=None, personal_api_key=None)
+    assert with_key.is_garmin_configured() and not without.is_garmin_configured()
+    assert dataclasses.replace(without, email="a@b.c").is_garmin_configured()
+
+    page = webapp_templates.setup_page(with_key, lang="en")
+    assert 'name="personal_api_key"' in page and "key saved" in page
+    assert "secret-key-value" not in page, "ключ не должен попадать в HTML"
+    assert "paste the key from Garmin Connect" in webapp_templates.setup_page(without, lang="en")
+    assert "ключ сохранён" in webapp_templates.setup_page(with_key, lang="ru")
+    print("OK: форма /setup - поле Personal API Key, статус Garmin, ключ не светится в HTML")
+
+
 def test_index() -> None:
     path = update_index()
     assert path.exists()
@@ -1076,6 +1320,9 @@ def test_index() -> None:
 
 
 if __name__ == "__main__":
+    test_personal_api_client_adapts_to_garminconnect_surface()
+    test_get_client_backend_selection()
+    test_setup_page_personal_api_key_field_and_status()
     test_fmt_duration()
     test_compute_km_splits_from_synthetic_track()
     test_fit_records_to_splits()
